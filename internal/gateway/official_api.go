@@ -149,28 +149,34 @@ func (g *Gateway) invokeOfficial(ctx context.Context, c call, frame onebot.Frame
 	}
 }
 
-func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p actionParams) (any, error) {
-	kind := p.Type
+func (p actionParams) sendKind(action string) string {
 	switch action {
 	case "send_group_msg":
-		kind = "group"
+		return "group"
 	case "send_private_msg":
-		kind = "private"
-	case "send_msg":
-		if kind == "" {
-			if numericID(p.GroupID) > 0 {
-				kind = "group"
-			} else {
-				kind = "private"
-			}
-		}
+		return "private"
 	}
+	if p.Type != "" {
+		return p.Type
+	}
+	if numericID(p.GroupID) > 0 {
+		return "group"
+	}
+	return "private"
+}
+
+func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p actionParams) (any, error) {
+	kind := p.sendKind(action)
+	redirected := c.input != c.route.input
 	id := numericID(p.UserID)
 	targetKind := "user"
 	if kind == "group" {
 		id, targetKind = numericID(p.GroupID), "group"
 	} else if kind != "private" {
 		return nil, actionError{1400, "invalid message_type"}
+	}
+	if redirected && (id <= 0 || id >= store.VirtualBase) {
+		return nil, actionError{1400, "group send routing requires a real QQ group number"}
 	}
 	namespace := c.input.namespace()
 	targetNamespace := namespace
@@ -179,13 +185,24 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	}
 	peer, err := g.store.Reverse(ctx, targetNamespace, targetKind, id)
 	if err != nil {
+		if redirected && errors.Is(err, store.ErrUnmapped) {
+			return nil, actionError{1404, "real QQ group is not mapped for the selected official Bot"}
+		}
 		return nil, err
 	}
 	record, err := g.store.Lookup(ctx, store.Identity{Namespace: targetNamespace, Kind: targetKind, Native: peer})
 	if err != nil {
 		return nil, err
 	}
-	if kind == "group" && !c.input.officialBusinessGroup(record.Real) ||
+	if redirected && record.Real != id {
+		return nil, actionError{1404, "real QQ group is not mapped for the selected official Bot"}
+	}
+	if redirected {
+		// A route can explicitly select an official sender whose inbound events are silent.
+		if !c.input.officialGroupAllowed(record.Real) {
+			return nil, actionError{1403, "group is outside the selected official Bot's group allowlist"}
+		}
+	} else if kind == "group" && !c.input.officialBusinessGroup(record.Real) ||
 		kind == "private" && !c.input.officialPrivateAllowed(record.Real) {
 		return nil, actionError{1403, "conversation outside the input scope"}
 	}
@@ -205,6 +222,11 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	segments, err := parseMessage(p.Message, p.AutoEscape)
 	if err != nil {
 		return nil, err
+	}
+	if redirected {
+		// The OneBot source's message handles are not valid QQ reply credentials.
+		p.MessageID = nil
+		segments = slices.DeleteFunc(segments, func(part segment) bool { return part.Type == "reply" })
 	}
 	var text strings.Builder
 	var quoteID int64
@@ -258,7 +280,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	if refID == 0 {
 		refID = quoteID
 	}
-	if refID == 0 && c.route.cfg.ImplicitReply == "unique-recent" {
+	if refID == 0 && !redirected && c.route.cfg.ImplicitReply == "unique-recent" {
 		refID, err = g.recentReply(c, kind, peer, time.Now())
 		if err != nil {
 			return nil, err

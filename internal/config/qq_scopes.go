@@ -15,10 +15,10 @@ import (
 // Unmapped entries must be replaced with real IDs before the scope can load.
 func (cfg *Config) UpgradeQQScopes(path string) error {
 	type scope struct {
-		input   string
-		keys    []store.Identity
-		dest    *[]string
-		replace bool
+		input, field string
+		keys         []store.Identity
+		dest         *[]string
+		replace      bool
 	}
 	var scopes []scope
 	var allKeys []store.Identity
@@ -29,15 +29,15 @@ func (cfg *Config) UpgradeQQScopes(path string) error {
 		}
 		groupNS := "qq:" + in.AppID
 		for _, list := range []struct {
-			namespace, kind string
-			values          []string
-			dest            *[]string
-			mixed           bool
+			namespace, kind, field string
+			values                 []string
+			dest                   *[]string
+			mixed                  bool
 		}{
-			{groupNS, "group", in.GroupOpenIDs, &in.GroupIDs, false},
-			{groupNS + ":c2c", "user", in.PrivateOpenIDs, &in.PrivateQQIDs, false},
-			{groupNS, "group", in.SilentGroups, &in.SilentGroups, true},
-			{groupNS, "group", in.BusinessGroups, &in.BusinessGroups, true},
+			{groupNS, "group", "group_ids", in.GroupOpenIDs, &in.GroupIDs, false},
+			{groupNS + ":c2c", "user", "private_qq_ids", in.PrivateOpenIDs, &in.PrivateQQIDs, false},
+			{groupNS, "group", "silent_groups", in.SilentGroups, &in.SilentGroups, true},
+			{groupNS, "group", "business_groups", in.BusinessGroups, &in.BusinessGroups, true},
 		} {
 			if !list.mixed && len(*list.dest) > 0 {
 				continue
@@ -49,7 +49,7 @@ func (cfg *Config) UpgradeQQScopes(path string) error {
 				}
 			}
 			if len(keys) > 0 {
-				scopes = append(scopes, scope{input: in.ID, keys: keys, dest: list.dest, replace: list.mixed})
+				scopes = append(scopes, scope{input: in.ID, field: list.field, keys: keys, dest: list.dest, replace: list.mixed})
 				allKeys = append(allKeys, keys...)
 			}
 		}
@@ -66,7 +66,7 @@ func (cfg *Config) UpgradeQQScopes(path string) error {
 	defer cancel()
 	ids, err := store.ReadRealIDs(ctx, dbPath, allKeys)
 	if err != nil {
-		return fmt.Errorf("could not read identity mappings for legacy QQ scopes")
+		return fmt.Errorf("旧版 QQ 群或私聊白名单需要从身份数据库转换 OpenID，但读取失败。请检查「身份数据库」的 SQLite 文件和读取权限。")
 	}
 	for _, scope := range scopes {
 		values := *scope.dest
@@ -75,7 +75,7 @@ func (cfg *Config) UpgradeQQScopes(path string) error {
 		}
 		for _, key := range scope.keys {
 			if ids[key] == 0 {
-				return fmt.Errorf("input %q has an unmapped legacy QQ scope; use real group_ids and private_qq_ids", scope.input)
+				return fmt.Errorf("输入 %q 的 %s 含尚未绑定的旧 OpenID。请在身份映射中补齐关联，或在 YAML 中用真实群号或 QQ 号填写 %s，并移除对应的旧 OpenID 配置。", scope.input, scope.field, scope.field)
 			}
 			id := strconv.FormatInt(ids[key], 10)
 			if !slices.Contains(values, id) {

@@ -21,7 +21,7 @@ inputs:
 - 群事件支持 `GROUP_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE`，私聊支持 `C2C_MESSAGE_CREATE`。普通群消息权限需逐 AppID 确认。`self_id` 是供 OneBot 使用的固定 Bot ID，事件和握手保持一致。
 - `group_ids` 填真实 QQ 群号，`private_qq_ids` 填真实 QQ 号。群白名单根据已确认的群映射放行，私聊白名单在识别出真实 QQ 号后生效。留空允许该场景中的全部身份，私聊默认关闭，可用 `enable_private: true` 开启。旧配置中已有真实映射的条目会转换成真实 ID。
 - 已绑定真实 QQ 号的私聊按路由正常转发。未绑定用户收到一次性绑定码后，在十分钟内到自己和官 Bot 都在的群里 @ 官 Bot 发送该码。发码的官 Bot 和观察 Bot 都要在同一个已映射群收到该码。网关验证私聊 OpenID 对应头像和观察到的真实 QQ 头像后，锁定绑定群、写入账号绑定，并由官 Bot 在该群回复「绑定成功」。没有在线观察 Bot 或根据群列表确认没有共同群时，私聊回复「私聊暂不可用」。旧的 `private_bind_group` 配置可以删除。
-- 每个输入可分别用真实群号设置 `silent_groups` 和 `business_groups`。静默群仍可用于匹配和私聊绑定，业务事件不会转发到后端。
+- 每个输入可分别用真实群号设置 `silent_groups` 和 `business_groups`。静默群仍可用于匹配和私聊绑定，业务事件不会转发到后端。路由明确指定该官 Bot 发送群消息时，静默群可接收代发消息，发送仍受官 Bot 群白名单约束。
 
 ## API
 

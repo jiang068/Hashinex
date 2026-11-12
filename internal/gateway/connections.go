@@ -120,7 +120,7 @@ func (g *Gateway) runInput(in *input, conn *websocket.Conn) {
 	g.mu.Unlock()
 	log.Info("upstream connected", "self_id", in.cfg.SelfID)
 	defer g.detachInput(in, peer)
-	if in.cfg.Observes() {
+	if in.observes {
 		ctx, cancel := context.WithCancel(g.ctx)
 		defer cancel()
 		g.workers.Go(func() { g.pollObserverGroups(ctx, in, peer) })

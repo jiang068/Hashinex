@@ -26,3 +26,28 @@ WebUI 的输入编辑窗口提供可复制的完整「反向 WebSocket 连接地
 路由设置了 `groups` 时默认只转发这些群的事件。设置 `include_private: true` 可同时转发私聊。私聊仍受该输入的私聊设置和路由的 `users` 过滤。
 
 使用 `outputs: [gscore, astrbot]` 将一条路由发给多个后端，每个后端使用独立连接和 API 回程。旧的单输出 `to` 配置仍可读取。`passthrough: true` 发送原始事件帧，并记录转发计数。QQ 官方输入会原样发出 QQ 事件 JSON。使用 OneBot 协议的后端需要转换模式来处理 QQ 官方事件。
+
+## 野生 Bot 收消息，官 Bot 发群消息
+
+1. 将野生 Bot 接为提供真实 QQ 号的 OneBot 输入，并放行业务群。
+2. 让官 Bot 加入目标群，在其输入设置开启「允许主动发送」，并在「身份映射」中确认该官 Bot 的群 OpenID 已绑定到真实群号。官 Bot 配置了群白名单时，目标群必须在白名单内。目标群可继续在官 Bot 输入上保持静默。
+3. 在「路由管理」选择野生 Bot 为来源、gscore 或 AstrBot 为输出，开启「允许下游 API 回程」，在「群消息发送 Bot」选择官 Bot。填写「官 Bot 发送群号」后，只有名单内的群改由官 Bot 发送，其他群仍由野生 Bot 回复。此字段留空时，官 Bot 负责该路由允许的所有群。保存后重启网关。
+
+```yaml
+routes:
+  - from: napcat
+    outputs: [gscore]
+    allow_actions: true
+    send_group_via: official-a
+    send_group_via_groups: ["123456789", "987654321"]
+```
+
+「群号过滤」决定整条路由允许处理哪些群。仅切换部分群的发送 Bot 时，填写「官 Bot 发送群号」即可。仅需官 Bot 发消息的群，无需再为该官 Bot 配置通往同一后端的入站路由。
+
+改由官 Bot 发送时，网关会移除野生 Bot 的消息 ID 和引用段。文本、图片与有映射的 @ 使用官 Bot 支持的消息格式。私聊发送、资料查询和撤回等其他动作仍交给来源 Bot。官 Bot 发送失败时，下游收到错误。清空「群消息发送 Bot」恢复使用来源 Bot 发群消息。
+
+## AstrBot 与 AiBot
+
+- AstrBot 的 OneBot v11 适配器可同时接入不同 `self_id` 的 Bot，基于原事件的回复按该事件的 `self_id` 选择连接。同一群事件经两个输入交给 AstrBot 时，可能处理两次。定时发送等缺少原事件的动作需要能选定发送 Bot。
+- AiBot 的发送器只保留一个 Bot 实例。使用野收官发时，在野生 Bot 路由选择 AiBot 输出，并在该路由配置「群消息发送 Bot」和代发群号。官 Bot 的直连业务路由只勾选需要它直接接收事件的其他输出。AiBot 的 OneBot 输出可使用 `reverse-dial`，地址填写它实际监听的完整反向 WebSocket 地址，例如 `ws://127.0.0.1:8080/onebot/v11/ws`。
+- 野生 Bot 输入的静默群会停止向其所有业务输出投递该群事件。AiBot 要从野生 Bot 收某群的消息时，该群需允许转发。官 Bot 作为指定发送者时可保持入站静默，发送仍受目标群映射、平台权限和群白名单限制。

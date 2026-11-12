@@ -49,20 +49,32 @@ function notice(message, error = false) {
   if (message && !error) noticeTimer = setTimeout(() => { node.hidden = true; }, 5000);
 }
 
+function setSaveError(id, message = "") {
+  const node = get(id);
+  node.textContent = message;
+  node.hidden = !message;
+}
+
 function attempt(operation) {
   return Promise.resolve().then(operation).catch(error => notice(error.message, true));
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    cache: "no-store",
-    headers: { Authorization: "Bearer " + token, "X-Hashinex-Admin": "1", ...options.headers }
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      cache: "no-store",
+      headers: { Authorization: "Bearer " + token, "X-Hashinex-Admin": "1", ...options.headers }
+    });
+  } catch {
+    throw new Error("无法连接网关。请检查网关是否运行，以及当前页面能否访问它。");
+  }
   if (response.ok) return response;
   if (response.status === 401) throw Object.assign(new Error("管理令牌无效，请重新登录。"), { status: 401 });
   if (response.status === 412) throw new Error("配置已被其他页面或进程修改。请重新读取后再保存。");
-  throw new Error((await response.text()).trim() || "请求失败。");
+  const detail = response.headers.get("Content-Type")?.startsWith("text/plain") ? (await response.text()).trim() : "";
+  throw new Error(detail || "网关请求失败（HTTP " + response.status + "）。请检查网关状态后重试。");
 }
 
 const badge = (label, style = "") => element("span", "badge " + style, label);
@@ -463,13 +475,16 @@ function renderCollection(key) {
       const endpoint = official ? (item.events === "webhook" ? location.origin + "/qq/webhook/" + item.id : "QQ Gateway") :
         (item.url || reverseAddress(item));
       const outputs = [...new Set(settings.routes.filter(route => route.from === item.id).flatMap(targets))];
+      const sendRoutes = settings.routes.filter(route => route.send_group_via === item.id).length;
       return [
         element("div", "", code(item.id), element("small", "log-details mono", "self_id " + item.self_id)),
         element("div", "", protocols[item.protocol], element("small", "log-details", role(item.role)),
           item.silent_groups?.length || item.business_groups?.length ? element("small", "log-details",
             (item.silent_groups?.length || 0) + " 个静默群 · " + (item.business_groups?.length || 0) + " 个业务群") : null),
         element("div", "", displayAddress(endpoint), element("small", "log-details", official ? item.events : modes[item.ws_mode])),
-        outputs.length ? button(outputs.join("、"), () => showRoutes(item.id), "text-button") : "无业务路由",
+        element("div", "", outputs.length ? button(outputs.join("、"), () => showRoutes(item.id), "text-button") : null,
+          sendRoutes ? element("small", "log-details", "为 " + sendRoutes + " 条路由发送群消息") : null,
+          !outputs.length && !sendRoutes ? "无业务路由" : null),
         current.has(item.id) ? linkState(current.get(item.id).online) : badge("待应用", "amber"), editControls(key, index)
       ];
     }), "暂无输入。添加一个 QQ 官方 Bot 或 OneBot 适配器。");
@@ -503,9 +518,12 @@ function renderCollection(key) {
         return element("div", "actions", code(target), session ? linkState(session.online) : badge("待应用", "amber"));
       });
       const path = element("div", "route-path", code(item.from), element("span", "", "→"), element("div", "endpoint-list", ...outputs));
+      const sendGroups = item.send_group_via_groups?.length;
+      const actions = element("div", "", badge(item.allow_actions ? "已允许" : "已关闭", item.allow_actions ? "green" : ""),
+        item.send_group_via ? element("small", "log-details", (sendGroups ? sendGroups + " 个群" : "全部路由群") + "由 ", code(item.send_group_via), " 发送") : null);
       return [[path, item.events?.join("、") || "全部事件", filters.join(" · ") || "无",
         badge(item.passthrough ? "原样透传" : "身份转换"),
-        badge(item.allow_actions ? "已允许" : "已关闭", item.allow_actions ? "green" : ""),
+        actions,
         editControls(key, index)]];
     });
     table("route-list", ["输入 → 输出", "事件", "过滤", "转发方式", "API 回程", "操作"], rows, "没有符合条件的路由。");
@@ -569,6 +587,10 @@ function allowFormEdit() {
 function removeEntry(key, index) {
   if (!allowFormEdit()) return;
   const item = settings[key][index];
+  if (key === "inputs" && settings.routes.some(route => route.send_group_via === item.id)) {
+    notice("该输入负责路由的群消息发送。请先在路由中更换发送 Bot。", true);
+    return;
+  }
   const related = key === "inputs" ? settings.routes.filter(route => route.from === item.id) :
     key === "outputs" ? settings.routes.filter(route => targets(route).includes(item.id)) : [];
   const observeList = settings.matching.observation_inputs || [];
@@ -617,7 +639,8 @@ function showEdit(title, description, fields, values, onSubmit, submitLabel) {
       }
       if (!settings[spec.source].length) input.append(element("small", "", "先在输出管理中添加输出。"));
     } else if (spec.options || spec.source) {
-      const options = spec.options || [["", "请选择"], ...settings[spec.source].map(item => [item.id, item.id])];
+      const options = typeof spec.options === "function" ? spec.options(settings) :
+        spec.options || [["", "请选择"], ...settings[spec.source].map(item => [item.id, item.id])];
       input = element("select");
       for (const option of options) {
         const [value, text] = Array.isArray(option) ? option : [option, option];
@@ -669,7 +692,7 @@ function showEdit(title, description, fields, values, onSubmit, submitLabel) {
       hint ? element("small", "", hint) : null);
     const field = element("div", spec.wide ? "wide" : "", contents,
       clear ? element("label", "clear-secret", clear, "清除令牌") : null);
-    return { key, input, field, spec, clear, copy };
+    return { key, label, input, field, spec, clear, copy };
   });
   const viewValues = () => Object.fromEntries(controls.map(({ key, input }) => [key, input.value]));
   function visibility() {
@@ -692,7 +715,7 @@ function showEdit(title, description, fields, values, onSubmit, submitLabel) {
   visibility();
   edit = async () => {
     const updated = { ...values };
-    for (const { key, input, spec, clear } of controls) {
+    for (const { key, label, input, spec, clear } of controls) {
       if (input.disabled || spec.preview) continue;
       const value = input.value?.trim() || "";
       if (spec.multiple) {
@@ -704,14 +727,15 @@ function showEdit(title, description, fields, values, onSubmit, submitLabel) {
         else if (input.value) updated[key] = input.value;
         else if (updated[key] === null) delete updated[key];
         if (spec.mandatory && !updated[key] && !updated[base + "_ref"] && !updated[base + "_env"]) {
-          throw new Error("请填写必需的密钥。");
+          throw new Error("请填写「" + label + "」。");
         }
       } else if (spec.kind === "boolean") updated[key] = input.checked;
       else if (spec.kind === "number") updated[key] = Number(value);
       else if (spec.kind === "list") {
         updated[key] = value.split(/[\s,，]+/).filter(Boolean);
-        if (spec.realIDs && updated[key].some(id => !/^[1-9][0-9]{0,13}$/.test(id))) {
-          throw new Error("过滤条件请填写真实 QQ 号或群号。");
+        if (spec.realIDs) {
+          const invalid = updated[key].findIndex(id => !/^[1-9][0-9]{0,13}$/.test(id));
+          if (invalid !== -1) throw new Error("「" + label + "」第 " + (invalid + 1) + " 项无效。请填写真实 QQ 号或群号。");
         }
       }
       else if (value || key === "real_id") updated[key] = value;
@@ -734,19 +758,31 @@ function openCollection(key, index = -1) {
   if (key === "inputs" && !initial.role) initial.role = "active";
   if (key === "inputs" && initial.protocol === "qq-official" && !initial.ws_mode) initial.ws_mode = "reverse-listen";
   showEdit((prior ? "编辑" : "新增") + collection.label, "更改加入草稿后，可与其他配置一起保存。", collection.fields, initial, draft => {
-    const item = collection.clean(draft);
-    const conflict = settings[key].some((other, i) => i !== index && (key === "routes"
+    const item = collection.clean(draft, settings);
+    const conflict = settings[key].find((other, i) => i !== index && (key === "routes"
       ? other.from === item.from && targets(other).some(target => targets(item).includes(target)) : other.id === item.id));
-    if (conflict) throw new Error("该名称或路由已存在。");
+    if (conflict) {
+      if (key === "routes") {
+        const target = targets(item).find(output => targets(conflict).includes(output));
+        throw new Error("已有从「" + item.from + "」到「" + target + "」的路由。请编辑已有路由，或选择其他输出。");
+      }
+      throw new Error(collection.label + "名称「" + item.id + "」已存在。请填写不同的名称。");
+    }
     const keys = [key];
     if (prior) {
       settings[key][index] = item;
       if (prior.id !== item.id && ["inputs", "outputs"].includes(key)) {
-        const affected = route => key === "inputs" ? route.from === prior.id : targets(route).includes(prior.id);
+        const affected = route => key === "inputs" ? route.from === prior.id || route.send_group_via === prior.id :
+          targets(route).includes(prior.id);
         if (settings.routes.some(affected)) {
           settings.routes = settings.routes.map(route => {
             if (!affected(route)) return route;
-            if (key === "inputs") return { ...route, from: item.id };
+            if (key === "inputs") {
+              const updated = { ...route };
+              if (updated.from === prior.id) updated.from = item.id;
+              if (updated.send_group_via === prior.id) updated.send_group_via = item.id;
+              return updated;
+            }
             const updated = { ...route, outputs: targets(route).map(target => target === prior.id ? item.id : target) };
             delete updated.to;
             return updated;
@@ -783,6 +819,7 @@ function openSystem(key) {
 
 async function saveSettings() {
   if (busy || !changed.size) return;
+  setSaveError("settings-save-error");
   busy = true;
   renderSettings();
   try {
@@ -802,6 +839,8 @@ async function saveSettings() {
     settings = null;
     await ensureSettings();
     notice("配置已保存，点击「重启网关」应用。");
+  } catch (error) {
+    setSaveError("settings-save-error", error.message);
   } finally {
     busy = false;
     if (settings) renderSettings();
@@ -865,6 +904,7 @@ async function discardSettings() {
   try {
     await ensureSettings();
     changed.clear();
+    setSaveError("settings-save-error");
     renderSettings();
   } catch (error) {
     settings = previous;
@@ -878,12 +918,14 @@ async function loadYAML() {
   get("yaml").value = await response.text();
   yamlTag = response.headers.get("ETag");
   yamlDirty = false;
+  setSaveError("yaml-save-error");
 }
 
 async function saveYAML() {
   if (busy) return;
   if (changed.size) throw new Error("请先保存或撤销表单草稿。");
   if (!yamlTag) throw new Error("请先读取配置。");
+  setSaveError("yaml-save-error");
   busy = true;
   try {
     const result = await request("api/config", {
@@ -897,6 +939,8 @@ async function saveYAML() {
     await ensureSettings();
     renderSettings();
     notice("YAML 已保存，点击「重启网关」应用。");
+  } catch (error) {
+    setSaveError("yaml-save-error", error.message);
   } finally {
     busy = false;
     renderRestart();

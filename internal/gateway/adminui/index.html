@@ -58,6 +58,7 @@
           <span id="draft-description">有未保存的配置更改</span>
           <div class="actions"><button type="button" id="discard">撤销草稿</button><button type="button" class="primary" id="save">保存配置</button></div>
         </div>
+        <p class="save-error" id="settings-save-error" role="alert" hidden></p>
         <p class="restart-note" id="restart-note" role="status" hidden></p>
         <section id="overview">
           <div class="page-heading"><div><h1>网关概览</h1><p>连接状态、消息流量与身份匹配</p></div><span class="live-label"><span class="signal"></span>每 3 秒刷新</span></div>
@@ -141,6 +142,7 @@
               <label for="yaml">配置文件</label>
               <textarea id="yaml" spellcheck="false" rows="18"></textarea>
               <div class="actions"><button type="button" id="reload-yaml">重新读取</button><button class="primary" type="submit">校验并保存 YAML</button></div>
+              <p class="save-error" id="yaml-save-error" role="alert" hidden></p>
             </form>
           </details>
         </section>

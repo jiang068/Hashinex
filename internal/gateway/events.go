@@ -69,10 +69,9 @@ func (g *Gateway) processEvent(in *input, e event, recent *list.List, byKey map[
 		recent.PushBack(seenEvent{key, now})
 	}
 	group := onebot.ID(e.frame.GroupID)
-	observes := group != "" && in.cfg.Observes()
+	observes := group != "" && in.observes
 	groupMessage := e.frame.PostType == "message" && e.frame.MessageType == "group"
-	parseObservation := observes && groupMessage && (g.matcher != nil || g.privateChecks != nil) &&
-		filterAllows(g.matching.ObservationInputs, in.cfg.ID)
+	parseObservation := observes && groupMessage && (g.matcher != nil || g.privateChecks != nil)
 	var bindingCode string
 	if observes {
 		switch e.frame.PostType {

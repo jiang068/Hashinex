@@ -28,7 +28,7 @@ func (g *Gateway) pollObserverGroups(ctx context.Context, in *input, peer *trans
 }
 
 func (g *Gateway) acceptObserverGroups(in *input, peer *transport.Peer, frame onebot.Frame) bool {
-	if !in.cfg.Observes() || string(frame.Echo) != strconv.Quote(g.prefix+"-observer-groups") {
+	if !in.observes || string(frame.Echo) != strconv.Quote(g.prefix+"-observer-groups") {
 		return false
 	}
 	var groups []struct {
@@ -86,7 +86,7 @@ func (g *Gateway) hasPrivateObserver(official *input) bool {
 	defer g.mu.Unlock()
 	now := time.Now()
 	for _, in := range g.inputs {
-		if !in.cfg.Observes() || in.peer == nil || !filterAllows(g.matching.ObservationInputs, in.cfg.ID) {
+		if !in.observes || in.peer == nil {
 			continue
 		}
 		for group, at := range in.observerGroups {
@@ -110,8 +110,7 @@ func (g *Gateway) observesGroup(official *input, group int64) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, in := range g.inputs {
-		if in.cfg.Observes() && in.peer != nil && in.observerGroups[number].After(since) &&
-			filterAllows(g.matching.ObservationInputs, in.cfg.ID) {
+		if in.observes && in.peer != nil && in.observerGroups[number].After(since) {
 			return true
 		}
 	}

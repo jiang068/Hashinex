@@ -26,6 +26,7 @@ import (
 
 type input struct {
 	cfg            config.Input
+	observes       bool
 	peer           *transport.Peer
 	events         chan event
 	routes         []*route
@@ -54,6 +55,7 @@ type event struct {
 type route struct {
 	cfg             config.Route
 	input           *input
+	groupSender     *input
 	output          config.Output
 	peer            *transport.Peer
 	pending         int
@@ -138,7 +140,7 @@ func New(parent context.Context, cfg *config.Config, db *store.Store, log *slog.
 		outputs[output.ID] = output
 	}
 	for _, entry := range cfg.Inputs {
-		in := &input{cfg: entry, events: make(chan event, cfg.Limits.EventQueue)}
+		in := &input{cfg: entry, observes: cfg.Matching.Observes(entry), events: make(chan event, cfg.Limits.EventQueue)}
 		if entry.Protocol == config.QQOfficial {
 			in.official = qqofficial.NewClient(entry.AppID, entry.Secret, entry.APIOrigin, cfg.Limits.APITimeout)
 			in.officialEvents = make(chan officialEnvelope, cfg.Limits.EventQueue)
@@ -163,10 +165,11 @@ func New(parent context.Context, cfg *config.Config, db *store.Store, log *slog.
 	}
 	for _, entry := range cfg.Routes {
 		source := g.inputs[entry.From]
+		groupSender := g.inputs[entry.SendGroupVia]
 		for _, target := range entry.Targets() {
 			selected := entry
 			selected.To = target
-			r := &route{cfg: selected, input: source, output: outputs[target]}
+			r := &route{cfg: selected, input: source, groupSender: groupSender, output: outputs[target]}
 			source.routes = append(source.routes, r)
 			g.routes[[2]string{target, entry.From}] = r
 		}

@@ -25,7 +25,7 @@ func readSettings(raw []byte, path string) (map[string]any, error) {
 	}
 	all, err := settingsValues(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("无法读取表单配置。请在高级 YAML 编辑器检查当前配置格式。")
 	}
 	result := make(map[string]any, len(settingKeys))
 	for _, key := range settingKeys {
@@ -55,11 +55,11 @@ func settingsValues(cfg *config.Config) (map[string]any, error) {
 func mergeSettings(current, update []byte) ([]byte, error) {
 	var changes map[string]json.RawMessage
 	if err := json.Unmarshal(update, &changes); err != nil || len(changes) == 0 {
-		return nil, fmt.Errorf("expected a JSON object with changed settings")
+		return nil, fmt.Errorf("表单草稿为空或格式无效。请重新打开配置表单，修改后再保存。")
 	}
 	for key := range changes {
 		if !slices.Contains(settingKeys, key) {
-			return nil, fmt.Errorf("unsupported setting %q", key)
+			return nil, fmt.Errorf("草稿包含当前版本不支持的配置段。请刷新 WebUI 后重新编辑。")
 		}
 	}
 	if _, editsOutputs := changes["outputs"]; editsOutputs || changes["routes"] != nil {
@@ -84,7 +84,7 @@ func mergeSettings(current, update []byte) ([]byte, error) {
 	}
 	var document yaml.Node
 	if err := yaml.Unmarshal(current, &document); err != nil || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("configuration is not a YAML mapping")
+		return nil, fmt.Errorf("当前配置的 YAML 须以字段和值组成。请先在高级 YAML 编辑器修正配置文件。")
 	}
 	root := document.Content[0]
 	for _, key := range settingKeys {
@@ -94,12 +94,12 @@ func mergeSettings(current, update []byte) ([]byte, error) {
 		}
 		var node yaml.Node
 		if err := yaml.Unmarshal(raw, &node); err != nil || len(node.Content) != 1 {
-			return nil, fmt.Errorf("invalid setting %q", key)
+			return nil, fmt.Errorf("配置段 %q 的草稿格式无效。请重新打开该设置并填写。", key)
 		}
 		value := node.Content[0]
 		normalizeSettingNode(value)
 		if key == "inputs" && value.Kind == yaml.SequenceNode {
-			for _, input := range value.Content {
+			for index, input := range value.Content {
 				if input.Kind != yaml.MappingNode {
 					continue
 				}
@@ -107,7 +107,7 @@ func mergeSettings(current, update []byte) ([]byte, error) {
 					if input.Content[i].Value == "intents" {
 						intent := input.Content[i+1]
 						if _, err := strconv.ParseUint(intent.Value, 10, 64); err != nil {
-							return nil, fmt.Errorf("intents must be an unsigned integer")
+							return nil, fmt.Errorf("第 %d 个输入的 Gateway Intents（intents）须为非负整数。请填写数字，或留空使用默认值。", index+1)
 						}
 						intent.Tag, intent.Style = "!!int", 0
 					}
@@ -143,10 +143,10 @@ func normalizeSettingNode(node *yaml.Node) {
 func extractCredentialEdits(update []byte) ([]byte, map[string]string, error) {
 	var changes map[string]json.RawMessage
 	if err := json.Unmarshal(update, &changes); err != nil {
-		return nil, nil, fmt.Errorf("invalid settings draft")
+		return nil, nil, fmt.Errorf("表单草稿格式无效。请刷新 WebUI 后重新编辑。")
 	}
 	secrets := make(map[string]string)
-	updateEntry := func(entry map[string]json.RawMessage, kind string) error {
+	updateEntry := func(entry map[string]json.RawMessage, kind, label, location string) error {
 		key := kind + "_value"
 		raw, exists := entry[key]
 		if !exists {
@@ -155,7 +155,7 @@ func extractCredentialEdits(update []byte) ([]byte, map[string]string, error) {
 		delete(entry, key)
 		var value *string
 		if err := json.Unmarshal(raw, &value); err != nil || (value != nil && (len(*value) == 0 || len(*value) > 4096)) {
-			return fmt.Errorf("invalid credential value")
+			return fmt.Errorf("%s的%s格式无效。请填写长度不超过 4096 字节的文本。", location, label)
 		}
 		delete(entry, kind+"_ref")
 		delete(entry, kind+"_env")
@@ -168,17 +168,20 @@ func extractCredentialEdits(update []byte) ([]byte, map[string]string, error) {
 		}
 		return nil
 	}
-	for _, key := range []string{"inputs", "outputs"} {
+	for _, collection := range []struct{ key, label string }{{"inputs", "输入"}, {"outputs", "输出"}} {
+		key := collection.key
 		if raw, ok := changes[key]; ok {
 			var entries []map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &entries); err != nil {
-				return nil, nil, fmt.Errorf("invalid %s draft", key)
+				return nil, nil, fmt.Errorf("%s列表（%s）的草稿格式无效。请在「%s管理」重新编辑。", collection.label, key, collection.label)
 			}
-			for _, entry := range entries {
-				for _, kind := range []string{"token", "secret"} {
-					if err := updateEntry(entry, kind); err != nil {
-						return nil, nil, err
-					}
+			for index, entry := range entries {
+				location := fmt.Sprintf("第 %d 个%s", index+1, collection.label)
+				if err := updateEntry(entry, "token", "连接令牌", location); err != nil {
+					return nil, nil, err
+				}
+				if err := updateEntry(entry, "secret", "AppSecret", location); err != nil {
+					return nil, nil, err
 				}
 			}
 			changes[key], _ = json.Marshal(entries)
@@ -187,9 +190,9 @@ func extractCredentialEdits(update []byte) ([]byte, map[string]string, error) {
 	if raw, ok := changes["admin"]; ok {
 		var entry map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &entry); err != nil {
-			return nil, nil, fmt.Errorf("invalid admin settings")
+			return nil, nil, fmt.Errorf("管理访问（admin）的草稿格式无效。请重新打开「管理访问」表单。")
 		}
-		if err := updateEntry(entry, "token"); err != nil {
+		if err := updateEntry(entry, "token", "管理令牌", "「管理访问」"); err != nil {
 			return nil, nil, err
 		}
 		changes["admin"], _ = json.Marshal(entry)

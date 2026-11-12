@@ -104,12 +104,35 @@ export const collections = {
       ["include_private", "配置群号过滤时也转发私聊", flag],
       ["users", "用户过滤", { ...realIDs, hint: "填写真实 QQ 号。留空允许全部用户。" }],
       ["allow_actions", "允许下游 API 回程", flag],
+      ["send_group_via", "群消息发送 Bot", {
+        wide: true,
+        options: settings => [["", "沿用来源 Bot"], ...settings.inputs.filter(isOfficial).map(input =>
+          [input.id, input.id + (input.allow_proactive ? "" : "（需开启主动发送）")])],
+        hint: "官 Bot 需允许主动发送，绑定真实群号，并在群白名单中放行目标群。该群可继续在官 Bot 输入上保持静默。"
+      }],
+      ["send_group_via_groups", "官 Bot 发送群号", only({ ...realIDs,
+        hint: "填写一个或多个真实 QQ 群号，用逗号或空白分隔。其他群由来源 Bot 发送。留空时，官 Bot 负责该路由允许的所有群。"
+      }, draft => Boolean(draft.send_group_via))],
       ["passthrough", "原样透传事件", { ...flag, wide: true, hint: "保留上游事件格式与 ID。QQ 官方原始事件需要下游自行解析，gscore 与 AstrBot 的 OneBot 接入通常使用转换模式。" }],
       ["implicit_reply", "隐式回复", choices(["", "关闭"], ["unique-recent", "使用唯一的最近消息"])]
     ],
-    clean(draft) {
+    clean(draft, settings) {
       const item = { ...draft };
       delete item.to;
+      if (!item.send_group_via || !item.send_group_via_groups?.length) delete item.send_group_via_groups;
+      if (item.send_group_via) {
+        const source = settings.inputs.find(input => input.id === item.from);
+        const sender = settings.inputs.find(input => input.id === item.send_group_via);
+        if (source?.protocol !== "onebot11" || source.identity_source !== "real-qq") {
+          throw new Error("「群消息发送 Bot」要求来源输入提供真实 QQ 号。请选择真实 QQ 的 OneBot 输入，或将发送 Bot 设为「沿用来源 Bot」。");
+        }
+        if (!item.allow_actions) {
+          throw new Error("已指定群消息发送 Bot。请开启「允许下游 API 回程」，或将发送 Bot 设为「沿用来源 Bot」。");
+        }
+        if (sender?.protocol !== "qq-official" || !sender.allow_proactive) {
+          throw new Error("请在「输入管理」为官 Bot「" + item.send_group_via + "」开启「允许主动发送」，或更换群消息发送 Bot。");
+        }
+      }
       return item;
     }
   }
@@ -141,7 +164,7 @@ export const systemSettings = {
       ["group_successes_required", "群匹配证据数", number],
       ["group_senders_required", "群匹配不同发送者数", number],
       ["phash_max_distance", "最大 pHash 汉明距离", number],
-      ["observation_inputs", "观察实例白名单", { ...list, wide: true, hint: "输入实例名称用逗号或空白分隔。留空使用所有观察实例。" }],
+      ["observation_inputs", "观察实例白名单", { ...list, wide: true, hint: "填写提供真实 QQ 号的 OneBot 输入名称，用逗号或空白分隔。业务 Bot 也可参与观察。留空时自动使用静默观察输入和设有静默群的真实 QQ OneBot 输入。" }],
       ["default_avatar_phashes", "默认头像 pHash", { ...list, wide: true, hint: "每项填 16 位十六进制，使用逗号或空白分隔。" }]
     ]
   },

@@ -332,18 +332,22 @@ func (g *Gateway) adminConfig(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if r.Method == http.MethodPut && a.restarting {
-		http.Error(w, "网关正在重启", http.StatusConflict)
+		http.Error(w, "网关正在重启。请等重启完成后再保存。", http.StatusConflict)
 		return
 	}
 	file, err := os.Open(a.path)
 	if err != nil {
-		http.Error(w, "configuration file unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "无法打开配置文件。请检查配置文件是否存在，以及网关进程是否有读取权限。", http.StatusServiceUnavailable)
 		return
 	}
 	current, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	closeErr := file.Close()
-	if err != nil || closeErr != nil || len(current) > 1<<20 {
-		http.Error(w, "configuration file unavailable", http.StatusServiceUnavailable)
+	if err != nil || closeErr != nil {
+		http.Error(w, "无法读取当前配置文件。请检查网关进程的读取权限。", http.StatusServiceUnavailable)
+		return
+	}
+	if len(current) > 1<<20 {
+		http.Error(w, "当前配置文件超过 1 MiB。请缩减文件内容后重新读取。", http.StatusServiceUnavailable)
 		return
 	}
 	tag := fmt.Sprintf(`"%x"`, sha256.Sum256(current))
@@ -353,7 +357,7 @@ func (g *Gateway) adminConfig(w http.ResponseWriter, r *http.Request) {
 		if structured {
 			settings, err := readSettings(current, a.path)
 			if err != nil {
-				http.Error(w, "could not read configuration fields", http.StatusUnprocessableEntity)
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 				return
 			}
 			writeJSON(w, settings)
@@ -364,12 +368,12 @@ func (g *Gateway) adminConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Header.Get("If-Match") != tag {
-		http.Error(w, "configuration changed; reload before editing", http.StatusPreconditionFailed)
+		http.Error(w, "配置已被其他页面或进程修改。请重新读取配置后再保存。", http.StatusPreconditionFailed)
 		return
 	}
 	proposed, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "configuration body too large", http.StatusBadRequest)
+		http.Error(w, "无法读取保存请求。请检查网络连接，并将配置草稿控制在 1 MiB 内。", http.StatusBadRequest)
 		return
 	}
 	var secrets map[string]string
@@ -384,7 +388,7 @@ func (g *Gateway) adminConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(proposed) > 1<<20 {
-		http.Error(w, "configuration body too large", http.StatusBadRequest)
+		http.Error(w, "合并后的配置超过 1 MiB。请缩减配置后再保存。", http.StatusBadRequest)
 		return
 	}
 	secretPath, secretData, err := config.PrepareUpdate(current, proposed, a.path, secrets)
@@ -394,12 +398,12 @@ func (g *Gateway) adminConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if secretPath != "" {
 		if err := os.MkdirAll(filepath.Dir(secretPath), 0700); err != nil || replaceConfig(secretPath, secretData) != nil {
-			http.Error(w, "could not persist credentials", http.StatusServiceUnavailable)
+			http.Error(w, "无法保存密钥文件。请检查密钥文件所在目录的写入权限和磁盘空间。", http.StatusServiceUnavailable)
 			return
 		}
 	}
 	if err := replaceConfig(a.path, proposed); err != nil {
-		http.Error(w, "could not persist configuration", http.StatusServiceUnavailable)
+		http.Error(w, "无法保存配置文件。请检查配置目录的写入权限和磁盘空间，并确认文件未被其他程序锁定。", http.StatusServiceUnavailable)
 		return
 	}
 	a.modified = true

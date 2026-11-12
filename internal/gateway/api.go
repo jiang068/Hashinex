@@ -26,9 +26,11 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 		g.respond(peer, onebot.Failure(frame.Echo, 1403, "API actions are disabled for this route"))
 		return
 	}
+	upstream := r.input
 	if r.input.official == nil {
 		var params actionParams
-		if json.Unmarshal(frame.Params, &params) == nil {
+		canRedirect := r.groupSender != nil && (frame.Action == "send_group_msg" || frame.Action == "send_msg")
+		if err := json.Unmarshal(frame.Params, &params); err == nil {
 			group := onebot.ID(params.GroupID)
 			silent := group != "" && r.input.cfg.Silent(group, "")
 			if group != "" && r.cfg.Passthrough {
@@ -38,10 +40,25 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 				g.respond(peer, onebot.Failure(frame.Echo, 1403, "group is outside the route scope or in silent mode"))
 				return
 			}
+			if canRedirect {
+				switch params.sendKind(frame.Action) {
+				case "group":
+					if filterAllows(r.cfg.SendGroupViaGroups, group) {
+						upstream = r.groupSender
+					}
+				case "private":
+				default:
+					g.respond(peer, onebot.Failure(frame.Echo, 1400, "invalid message_type"))
+					return
+				}
+			}
+		} else if canRedirect {
+			g.respond(peer, onebot.Failure(frame.Echo, 1400, "invalid action parameters"))
+			return
 		}
 	}
 	c := call{
-		input: r.input, route: r, downstream: peer, echo: frame.Echo, action: frame.Action,
+		input: upstream, route: r, downstream: peer, echo: frame.Echo, action: frame.Action,
 		start: time.Now(),
 	}
 	c.deadline = c.start.Add(g.limits.APITimeout)
@@ -55,13 +72,13 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 		g.respond(peer, onebot.Failure(frame.Echo, 1503, "gateway shutting down"))
 		return
 	}
-	c.upstream = r.input.peer
+	c.upstream = c.input.peer
 	if c.upstream == nil && c.input.official == nil {
 		g.mu.Unlock()
 		g.respond(peer, onebot.Failure(frame.Echo, 1503, "upstream offline"))
 		return
 	}
-	if r.pending >= g.limits.PendingPerPeer || r.input.pending >= g.limits.PendingPerInput {
+	if r.pending >= g.limits.PendingPerPeer || r.input.pending >= g.limits.PendingPerInput || c.input.pending >= g.limits.PendingPerInput {
 		g.mu.Unlock()
 		g.respond(peer, onebot.Failure(frame.Echo, 1503, "too many in-flight actions"))
 		return
@@ -69,6 +86,9 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 	key := g.nextKey()
 	r.pending++
 	r.input.pending++
+	if c.input != r.input {
+		c.input.pending++
+	}
 	g.pending[key] = c
 	g.mu.Unlock()
 
@@ -170,7 +190,10 @@ func (g *Gateway) reject(key string, code int, reason string) {
 
 func (g *Gateway) removeLocked(key string, c call) {
 	delete(g.pending, key)
-	c.input.pending--
+	c.route.input.pending--
+	if c.input != c.route.input {
+		c.input.pending--
+	}
 	c.route.pending--
 }
 

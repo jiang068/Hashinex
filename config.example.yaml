@@ -33,3 +33,7 @@ routes: []
 #     outputs: [astrbot, gscore]
 #     events: [message]
 #     allow_actions: true
+#     # 可选。指向启用 allow_proactive 且已绑定真实群号的 QQ 官方输入。
+#     # send_group_via: official-a
+#     # 仅由官 Bot 发送的真实群号。省略时适用于路由允许的所有群。
+#     # send_group_via_groups: ["123456789", "987654321"]

@@ -1,29 +1,14 @@
 # Hashinex
 
-Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 OneBot v11 事件，把同一用户在不同官方 Bot 下的 OpenID 关联到真实 QQ 号，再按路由将事件送往 AstrBot、gsuid_core（gscore）等后端。后端可继续用真实 QQ 号查找原有业务数据，身份映射由 Hashinex 自己的 SQLite 管理。
+Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 OneBot v11 事件，把不同官方 Bot 下的 OpenID 关联到真实 QQ 号或群号，再按路由将事件送往 AstrBot、AiBot、gsuid_core（gscore）等后端。身份映射由 Hashinex 的 SQLite 管理，后端可继续使用真实 QQ 号查找原有业务数据。
 
 项目仍在功能迭代中。QQ 官方 Bot 的群聊、绑定后的私聊和 gscore 直连已完成实机联调。可接收的事件和可调用的动作取决于各 Bot 的平台权限。
 
 ## 快速启动
 
-需要 Go 1.26.11 或更高版本。在源码根目录执行以下命令。Windows 示例将开发用可执行文件和运行目录放在源码仓库旁边。
-
-```powershell
-$run = "../cache/hashinex-dev"
-New-Item -ItemType Directory -Force "$run/config" | Out-Null
-go build -trimpath -o "$run/hashinex.exe" ./cmd/hashinex
-if (!(Test-Path "$run/config/config.yaml")) {
-    Copy-Item config.example.yaml "$run/config/config.yaml"
-}
-& "$run/hashinex.exe" -check
-& "$run/hashinex.exe" -admin-setup
-```
-
-在 Linux 或 macOS 上，使用同一构建命令并省略文件名的 `.exe` 后缀。运行时默认按可执行文件的位置找 `config/config.yaml`，也可以用 `-config` 指定其他 YAML。
-
-1. 打开 [本地 WebUI](http://127.0.0.1:6700/admin/)。首次启动时留空登录，在「系统设置 → 管理访问」设置管理令牌。
-2. 在 WebUI 添加输入、输出和路由。QQ AppSecret、OneBot 令牌和 gscore 令牌都可在对应表单里保存。
-3. 保存草稿后点击「重启网关」应用变更。完成首次配置后，日常直接运行可执行文件。可通过 WebUI 或 `/healthz` 查看连接状态。
+1. 使用 Go 1.26.11 或更新版本编译，在 Windows 或 Linux 上选择目标架构。编译指南将工具链、依赖缓存和产物放在源码仓库外。 [编译指南](docs/build.md)
+2. 把可执行文件放到运行目录，复制公开样例为同目录下的 `config/config.yaml`。使用 `-check` 校验配置，再用 `-admin-setup` 首次启动。 [部署指南](docs/operations.md#首次启动) · [配置样例](config.example.yaml)
+3. 在 WebUI 设置管理令牌，添加输入、输出和路由。保存后点击「重启网关」。保存失败时，页面会指出相关字段、实例和修改方法。 [本地 WebUI](http://127.0.0.1:6700/admin/)
 
 ## 接入与路由
 
@@ -31,32 +16,22 @@ if (!(Test-Path "$run/config/config.yaml")) {
 | --- | --- |
 | QQ 官方 Bot | 每只 Bot 建一个独立输入，填写 AppID 和 AppSecret，选择官方 Gateway 或签名 Webhook。 |
 | NapCat、SnowLuma 等 OneBot 上游 | 建立 OneBot v11 输入。反向 WS 使用 WebUI 显示的完整地址，例如 `ws://127.0.0.1:6700/onebot/in/observer`。 |
-| AstrBot 等 OneBot 下游 | 建立 OneBot v11 输出，按下游配置选择监听或拨号。 |
+| AstrBot、AiBot 等 OneBot 下游 | 建立 OneBot v11 输出，按下游配置选择监听或拨号。AstrBot 可接入不同 `self_id` 的 Bot，AiBot 使用单个来源会话。 |
 | gsuid_core 直连 | 建立独立的 gscore 输出，填写 gsuid_core 的完整 WS 地址，例如 `ws://127.0.0.1:8765/ws/hashinex`。多个输入选择同一个 gscore 输出时共用连接。 |
 
 一个输入可以通过路由同时发送到多个输出。路由可按事件、真实 QQ 号和群号过滤，也可控制下游 API 回程。各输入可按真实群号指定静默群和业务群。默认转换事件及身份，开启「原样透传事件」后保留上游格式和 ID，并记录转发计数。透传 QQ 官方输入时，下游需要能解析 QQ 官方原始 JSON。
 
+使用野生 Bot 收消息时，可在路由里指定官 Bot 为部分群或全部群发送消息。名单外的群继续由来源 Bot 回复。 [配置步骤](docs/onebot.md#野生-bot-收消息官-bot-发群消息) · [AstrBot 与 AiBot 接入差异](docs/onebot.md#astrbot-与-aibot)
+
 ## 身份映射与私聊
 
 - WebUI 以真实 QQ 号或真实群号聚合映射，展开后可查看各 Bot 的 OpenID。身份列表支持按来源群、QQ 号和 OpenID 检索，可选每页 10、20、50、100 或 200 条。
-- 静默匹配通过观察 Bot 对照同一群消息，再比对双方头像。所有非空文本均可参与配对。可先用 `shadow` 查看候选，再按需要开启 `auto`。观察范围内的群才登记待匹配身份，匹配成功后清理待匹配记录。已有绑定可在没有观察 Bot 的群里继续用于正常业务。
+- 静默匹配通过观察 Bot 对照同一群消息，再比对双方头像。所有非空纯文本均可参与配对。使用真实 QQ 号的业务 Bot 加入观察实例白名单后，可以同时接收业务和提供匹配证据。已有绑定可在没有观察 Bot 的群里继续用于正常业务。 [匹配与头像验证](docs/matching.md)
 - 官方 Bot 私聊默认关闭。开启后，已绑定用户的消息按路由转发。新用户可在与官 Bot 同在的群里使用一次性绑定码，网关通过观察 Bot 和头像确认身份，随后由官 Bot 在群里回复「绑定成功」。观察 Bot 不可用时，未绑定用户收到「私聊暂不可用」。
 
 ## 配置、数据与迁移
 
-```text
-hashinex.exe
-config/
-  config.yaml
-  config.yaml.secrets.json
-data/
-  hashinex.sqlite
-  hashinex.jsonl
-```
-
-- [config.example.yaml](config.example.yaml) 是公开样例。实际配置可能包含 Bot 标识、群号和接入地址。WebUI 保存的密钥写入同目录的 `config.yaml.secrets.json`，YAML 里保存引用。
-- `data/` 保存身份映射、匹配记录、回复上下文和日志。数据库及日志可能包含账号标识和消息数据。实际运行目录及备份应放在源码仓库外。
-- 迁移时先正常停止网关，把整个 `config/` 和 `data/` 复制到目标可执行文件旁，运行 `hashinex -check` 后启动。自定义外部路径、环境变量密钥和下游业务库随各自的部署迁移。
+`config/` 保存网关配置和密钥，`data/` 保存 SQLite 和日志，两者默认位于可执行文件旁。迁移时先停止网关，再复制这两个目录到目标运行目录。运行配置、数据及其备份应留在源码仓库外。 [目录结构与迁移步骤](docs/operations.md)
 
 ## 源码目录
 
@@ -74,7 +49,9 @@ data/
 - [OneBot v11 接入](docs/onebot.md)
 - [gscore 直连与独立适配器](docs/gscore.md)
 - [静默匹配与头像验证](docs/matching.md)
-- [部署、迁移与故障排查](docs/operations.md)
+- [Windows 和 Linux 编译指南](docs/build.md)
+- [部署、升级与故障排查](docs/operations.md)
+- [任务清单](todo.md) · [更新日志](log.md)
 
 ## 参考项目与致谢
 

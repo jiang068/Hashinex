@@ -73,10 +73,6 @@ func (in Input) PrivateEnabled() bool {
 	return in.EnablePrivate && !in.DisablePrivate
 }
 
-func (in Input) Observes() bool {
-	return in.Protocol == OneBot11 && in.IdentitySource == RealQQ && (in.Role == Observe || len(in.SilentGroups) != 0)
-}
-
 func (in Input) Silent(group, native string) bool {
 	if group == "" && native == "" {
 		return in.Role == Observe
@@ -96,16 +92,18 @@ type Output struct {
 }
 
 type Route struct {
-	From           string   `yaml:"from"`
-	To             string   `yaml:"to,omitempty"`
-	Outputs        []string `yaml:"outputs,omitempty"`
-	Events         []string `yaml:"events,omitempty"`
-	Groups         []string `yaml:"groups,omitempty"`
-	Users          []string `yaml:"users,omitempty"`
-	IncludePrivate bool     `yaml:"include_private,omitempty"`
-	AllowActions   bool     `yaml:"allow_actions"`
-	ImplicitReply  string   `yaml:"implicit_reply,omitempty"`
-	Passthrough    bool     `yaml:"passthrough,omitempty"`
+	From               string   `yaml:"from"`
+	To                 string   `yaml:"to,omitempty"`
+	Outputs            []string `yaml:"outputs,omitempty"`
+	Events             []string `yaml:"events,omitempty"`
+	Groups             []string `yaml:"groups,omitempty"`
+	Users              []string `yaml:"users,omitempty"`
+	IncludePrivate     bool     `yaml:"include_private,omitempty"`
+	AllowActions       bool     `yaml:"allow_actions"`
+	SendGroupVia       string   `yaml:"send_group_via,omitempty"`
+	SendGroupViaGroups []string `yaml:"send_group_via_groups,omitempty"`
+	ImplicitReply      string   `yaml:"implicit_reply,omitempty"`
+	Passthrough        bool     `yaml:"passthrough,omitempty"`
 }
 
 func (r Route) Targets() []string {
@@ -175,6 +173,16 @@ type Matching struct {
 	DefaultHashes     []string      `yaml:"default_avatar_phashes,omitempty"`
 }
 
+func (m Matching) Observes(in Input) bool {
+	if in.Protocol != OneBot11 || in.IdentitySource != RealQQ {
+		return false
+	}
+	if len(m.ObservationInputs) != 0 {
+		return slices.Contains(m.ObservationInputs, in.ID)
+	}
+	return in.Role == Observe || len(in.SilentGroups) != 0
+}
+
 func Load(path string) (*Config, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -186,7 +194,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if len(raw) > 1<<20 {
-		return nil, fmt.Errorf("configuration exceeds 1 MiB")
+		return nil, fmt.Errorf("配置文件超过 1 MiB。请缩减配置后重试。")
 	}
 	return Decode(raw, path)
 }
@@ -204,7 +212,7 @@ func resolve(cfg *Config, path string, overrides map[string]string) (*Config, er
 	if err := cfg.UpgradeQQScopes(path); err != nil {
 		return nil, err
 	}
-	secrets, err := readCredentials(cfg, path, overrides)
+	secrets, err := readCredentials(cfg, path, overrides, true)
 	if err != nil {
 		return nil, err
 	}
@@ -249,11 +257,14 @@ func ParseAt(raw []byte, path string) (*Config, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("decode configuration: %w", err)
+		return nil, yamlConfigError(err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("configuration must contain one YAML document")
+		if err != nil {
+			return nil, yamlConfigError(err)
+		}
+		return nil, fmt.Errorf("配置文件只能包含一份 YAML 配置。请移除多余的文档分隔线和内容。")
 	}
 	return &cfg, nil
 }
@@ -261,124 +272,170 @@ func ParseAt(raw []byte, path string) (*Config, error) {
 func (cfg *Config) validate(secrets map[string]string) error {
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
-		return fmt.Errorf("listen must be a host and port")
+		return fmt.Errorf("「网关服务 → 监听地址」（listen）须填写主机和端口，例如 127.0.0.1:6700。")
 	}
 	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
-		return fmt.Errorf("listen must have a numeric port in 1..65535")
+		return fmt.Errorf("「网关服务 → 监听地址」（listen）的端口须为 1 到 65535 的整数。")
 	}
 	switch cfg.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
-		return fmt.Errorf("invalid log_level")
+		return fmt.Errorf("「网关服务 → 日志级别」（log_level）请选择 debug、info、warn 或 error。")
 	}
 	if cfg.PublicWS != "" {
 		address, err := wsURL(cfg.PublicWS)
 		if err != nil || (address.Path != "" && address.Path != "/") || address.RawQuery != "" {
-			return fmt.Errorf("public_ws_url must be a ws or wss origin")
+			return fmt.Errorf("「网关服务 → 对外 WebSocket 地址」（public_ws_url）只填 ws:// 或 wss:// 加主机和可选端口，请移除路径、查询参数和凭证。")
 		}
 	}
 	if cfg.Admin.TokenEnv != "" || cfg.Admin.TokenRef != "" {
 		cfg.Admin.Token = credential(secrets, cfg.Admin.TokenRef, cfg.Admin.TokenEnv)
 		if len(cfg.Admin.Token) < 16 || strings.ContainsAny(cfg.Admin.Token, " \t\r\n") {
-			return fmt.Errorf("admin token must contain at least 16 non-whitespace characters")
+			return fmt.Errorf("「管理访问 → 管理令牌」至少需要 16 个字符，且不能包含空白。请重新填写令牌。")
 		}
 	}
 	if cfg.Admin.AllowRemote && cfg.Admin.Token == "" {
-		return fmt.Errorf("remote admin access requires a management token")
+		return fmt.Errorf("「管理访问 → 允许从其他主机访问 WebUI」（admin.allow_remote）需要管理令牌。请设置管理令牌，或关闭远程访问。")
 	}
-	if cfg.Logging.MaxSize < 4096 || cfg.Logging.MaxSize > 1<<30 || cfg.Logging.Keep < 1 || cfg.Logging.Keep > 20 {
-		return fmt.Errorf("invalid file logging limits")
+	if cfg.Logging.MaxSize < 4096 || cfg.Logging.MaxSize > 1<<30 {
+		return fmt.Errorf("日志单文件大小（logging.max_size_bytes）须在 4096 字节到 1 GiB 之间。")
+	}
+	if cfg.Logging.Keep < 1 || cfg.Logging.Keep > 20 {
+		return fmt.Errorf("日志保留份数（logging.keep）须在 1 到 20 之间。")
 	}
 	limits := cfg.Limits
-	if limits.FrameBytes < 1024 || limits.FrameBytes > 16<<20 ||
-		limits.EventQueue < 1 || limits.EventQueue > 65536 ||
-		limits.APIQueue < 1 || limits.APIQueue > 65536 ||
-		limits.PendingPerPeer < 1 || limits.PendingPerPeer > limits.APIQueue ||
-		limits.PendingPerInput < limits.PendingPerPeer || limits.PendingPerInput > 65536 ||
-		limits.DedupSize < 1 || limits.DedupSize > 1<<20 {
-		return fmt.Errorf("invalid frame, queue, pending or dedup limits")
+	for _, limit := range []struct {
+		field           string
+		value, min, max int64
+	}{
+		{"frame_bytes", limits.FrameBytes, 1024, 16 << 20},
+		{"event_queue", int64(limits.EventQueue), 1, 65536},
+		{"api_queue", int64(limits.APIQueue), 1, 65536},
+		{"dedup_size", int64(limits.DedupSize), 1, 1 << 20},
+	} {
+		if limit.value < limit.min || limit.value > limit.max {
+			return fmt.Errorf("「队列与超时」的 limits.%s 须在 %d 到 %d 之间。", limit.field, limit.min, limit.max)
+		}
 	}
-	if limits.WriteTimeout < 25*time.Millisecond || limits.APITimeout < 25*time.Millisecond ||
-		limits.EventTTL <= 0 || limits.DedupTTL <= 0 || limits.PingInterval <= 0 {
-		return fmt.Errorf("all time limits must be positive")
+	if limits.PendingPerPeer < 1 || limits.PendingPerPeer > limits.APIQueue {
+		return fmt.Errorf("单连接待处理数（limits.pending_per_peer）须至少为 1，且不能超过 API 队列大小（limits.api_queue，当前为 %d）。请调低前者或调高队列大小。", limits.APIQueue)
 	}
-	if cfg.Storage.MessageTTL <= 0 || cfg.Storage.ReplyWindow <= 0 || cfg.Storage.ReplyWindow > cfg.Storage.MessageTTL {
-		return fmt.Errorf("invalid storage time limits")
+	if limits.PendingPerInput < limits.PendingPerPeer || limits.PendingPerInput > 65536 {
+		return fmt.Errorf("单输入待处理数（limits.pending_per_input）须至少等于单连接待处理数（limits.pending_per_peer，当前为 %d），且不能超过 65536。", limits.PendingPerPeer)
+	}
+	for _, limit := range []struct {
+		field      string
+		value, min time.Duration
+	}{
+		{"write_timeout", limits.WriteTimeout, 25 * time.Millisecond},
+		{"api_timeout", limits.APITimeout, 25 * time.Millisecond},
+		{"event_ttl", limits.EventTTL, time.Nanosecond},
+		{"dedup_ttl", limits.DedupTTL, time.Nanosecond},
+		{"ping_interval", limits.PingInterval, time.Nanosecond},
+	} {
+		if limit.value < limit.min {
+			return fmt.Errorf("「队列与超时」的 limits.%s 须至少为 %s。", limit.field, limit.min)
+		}
+	}
+	if cfg.Storage.MessageTTL <= 0 {
+		return fmt.Errorf("「身份数据库 → 消息保留时间」（storage.message_ttl）须大于 0，例如 24h。")
+	}
+	if cfg.Storage.ReplyWindow <= 0 || cfg.Storage.ReplyWindow > cfg.Storage.MessageTTL {
+		return fmt.Errorf("「身份数据库 → 隐式回复窗口」（storage.reply_window）须大于 0，且不能超过消息保留时间（storage.message_ttl，当前为 %s）。", cfg.Storage.MessageTTL)
 	}
 	inputs := make(map[string]Input, len(cfg.Inputs))
-	apps := make(map[string]bool)
-	listeners := make(map[string]bool)
+	apps := make(map[string]string)
+	listeners := make(map[string]string)
 	for i := range cfg.Inputs {
 		input := &cfg.Inputs[i]
+		if !namePattern.MatchString(input.ID) {
+			return fmt.Errorf("第 %d 个输入的名称（inputs[].id）须为 1 到 64 个英文字母、数字、下划线或短横线，并以字母或数字开头。", i+1)
+		}
 		if _, exists := inputs[input.ID]; exists {
-			return fmt.Errorf("duplicate input %q", input.ID)
+			return fmt.Errorf("输入 %q 的名称（id）重复。请给两个输入使用不同的名称，并更新引用该名称的路由和观察实例名单。", input.ID)
 		}
 		if input.Role == "" {
 			input.Role = Active
 		}
 		if input.Role != Active && input.Role != Observe {
-			return fmt.Errorf("invalid role for input %q", input.ID)
+			return fmt.Errorf("输入 %q 的「默认群行为」（role）请选择业务 Bot（active）或静默观察（observe）。", input.ID)
 		}
 		if input.Protocol == OneBot11 && input.Role == Observe && input.IdentitySource != RealQQ {
-			return fmt.Errorf("observe input %q must provide real QQ IDs", input.ID)
+			return fmt.Errorf("输入 %q 的「默认群行为」为静默观察（role: observe），要求「ID 来源」（identity_source）为真实 QQ。请接入提供真实 QQ 号的 OneBot，或改为业务 Bot。", input.ID)
 		}
 		if !validID(input.SelfID) {
-			return fmt.Errorf("invalid self_id for input %q", input.ID)
+			return fmt.Errorf("输入 %q 的 OneBot self_id 须为正整数。请填写该 Bot 的数字 ID。", input.ID)
 		}
-		for _, ids := range [][]string{input.SilentGroups, input.BusinessGroups, input.GroupIDs, input.PrivateQQIDs} {
-			for _, id := range ids {
+		for _, scope := range []struct {
+			field, label, identity string
+			ids                    []string
+		}{
+			{"silent_groups", "静默群", "QQ群号", input.SilentGroups},
+			{"business_groups", "业务群", "QQ群号", input.BusinessGroups},
+			{"group_ids", "群白名单", "QQ群号", input.GroupIDs},
+			{"private_qq_ids", "私聊白名单", "QQ号", input.PrivateQQIDs},
+		} {
+			for _, id := range scope.ids {
 				if !validQQID(id) {
-					return fmt.Errorf("input %q group scopes and allowlists require real QQ group numbers or QQ IDs", input.ID)
+					return fmt.Errorf("输入 %q 的「%s」（%s）须填写真实%s。请替换该列表中的无效号码、OpenID 或虚拟 ID。", input.ID, scope.label, scope.field, scope.identity)
 				}
 			}
 		}
 		switch input.Protocol {
 		case OneBot11:
 			if input.IdentitySource != RealQQ && input.IdentitySource != Virtual {
-				return fmt.Errorf("input %q requires an explicit identity_source", input.ID)
+				return fmt.Errorf("OneBot 输入 %q 缺少有效的「ID 来源」（identity_source）。请按上游实际提供的 ID 选择真实 QQ（real-qq）或适配器虚拟 ID（adapter-virtual）。", input.ID)
 			}
 			if input.Mode != ReverseListen && input.Mode != ForwardDial {
-				return fmt.Errorf("invalid OneBot WS mode for input %q", input.ID)
+				return fmt.Errorf("OneBot 输入 %q 的「连接方式」（ws_mode）请选择反向监听（reverse-listen）或正向拨号（forward-dial）。", input.ID)
 			}
 			if input.IdentitySource == Virtual && cfg.Storage.SQLite == "" {
-				return fmt.Errorf("storage.sqlite is required for virtual OneBot input %q", input.ID)
+				return fmt.Errorf("输入 %q 的「ID 来源」为适配器虚拟 ID，需要身份数据库。请在「系统设置 → 身份数据库」填写 SQLite 文件（storage.sqlite）。", input.ID)
 			}
 			if err := input.Endpoint.validate(host, port, input.Mode == ReverseListen, secrets); err != nil {
-				return err
+				return fmt.Errorf("「输入管理」%w", err)
 			}
 			if input.ListenPath != "" {
-				if !validListenPath(input.ListenPath) || listeners[input.ListenPath] {
-					return fmt.Errorf("invalid or duplicate listener path for input %q", input.ID)
+				if !validListenPath(input.ListenPath) {
+					return fmt.Errorf("输入 %q 的「自定义连接路径」（listen_path）无效或占用了网关保留路径。请改用例如 /bot/napcat，或留空使用默认路径。", input.ID)
 				}
-				listeners[input.ListenPath] = true
+				if existing := listeners[input.ListenPath]; existing != "" {
+					return fmt.Errorf("输入 %q 的「自定义连接路径」（listen_path）与%s重复。请更换其中一个监听路径，或留空使用默认路径。", input.ID, existing)
+				}
+				listeners[input.ListenPath] = fmt.Sprintf("输入 %q 的 listen_path", input.ID)
 			}
 		case QQOfficial:
-			if !namePattern.MatchString(input.ID) || !validID(input.AppID) || apps[input.AppID] ||
-				input.Mode != "" || input.URL != "" || input.ListenPath != "" || input.TokenEnv != "" || input.TokenRef != "" {
-				return fmt.Errorf("invalid or duplicate official QQ input %q", input.ID)
+			if !validID(input.AppID) {
+				return fmt.Errorf("QQ 官方输入 %q 的 AppID（app_id）须为正整数。请从 QQ 开放平台填写该 Bot 的 AppID。", input.ID)
+			}
+			if existing := apps[input.AppID]; existing != "" {
+				return fmt.Errorf("QQ 官方输入 %q 与 %q 的 AppID（app_id）重复。请为每个官方 Bot 仅保留一个输入。", input.ID, existing)
+			}
+			if input.Mode != "" || input.URL != "" || input.ListenPath != "" || input.TokenEnv != "" || input.TokenRef != "" {
+				return fmt.Errorf("输入 %q 已选择 QQ 官方 Bot，不能同时配置 OneBot 连接字段。请移除 ws_mode、url、listen_path、token_env 和 token_ref 中残留的 OneBot 设置。", input.ID)
 			}
 			if cfg.Storage.SQLite == "" {
-				return fmt.Errorf("storage.sqlite is required for official QQ inputs")
+				return fmt.Errorf("QQ 官方输入 %q 需要身份数据库。请在「系统设置 → 身份数据库」填写 SQLite 文件（storage.sqlite）。", input.ID)
 			}
 			input.Secret = credential(secrets, input.SecretRef, input.SecretEnv)
 			if input.Secret == "" {
-				return fmt.Errorf("AppSecret is required for input %q", input.ID)
+				return fmt.Errorf("QQ 官方输入 %q 缺少 AppSecret。请在该输入的 AppSecret 栏录入开放平台的密钥，或检查已有密钥引用。", input.ID)
 			}
 			if input.Events != "gateway" && input.Events != "webhook" {
-				return fmt.Errorf("official input %q requires events: gateway or webhook", input.ID)
+				return fmt.Errorf("QQ 官方输入 %q 的「接收事件」（events）请选择官方 Gateway（gateway）或签名 Webhook（webhook）。", input.ID)
 			}
 			if input.APIOrigin != "" && input.APIOrigin != "bot" && input.APIOrigin != "sgroup" {
-				return fmt.Errorf("official input %q has invalid api_origin", input.ID)
+				return fmt.Errorf("QQ 官方输入 %q 的「HTTP API」（api_origin）请选择默认、api.bot.qq.com（bot）或 api.sgroup.qq.com（sgroup）。", input.ID)
 			}
 			if input.PrivateBindGroup != "" && !validID(input.PrivateBindGroup) {
-				return fmt.Errorf("official input %q requires a numeric QQ group number for private_bind_group", input.ID)
+				return fmt.Errorf("QQ 官方输入 %q 的旧字段 private_bind_group 须为数字群号。新版会自动查找绑定群，可删除这个旧字段。", input.ID)
 			}
 			if input.Intents == 0 {
 				input.Intents = 1 << 25
 			}
-			apps[input.AppID] = true
+			apps[input.AppID] = input.ID
 		default:
-			return fmt.Errorf("unsupported protocol for input %q", input.ID)
+			return fmt.Errorf("输入 %q 的「接入协议」（protocol）请选择 OneBot v11（onebot11）或 QQ 官方 Bot（qq-official）。", input.ID)
 		}
 		inputs[input.ID] = *input
 	}
@@ -386,134 +443,211 @@ func (cfg *Config) validate(secrets map[string]string) error {
 	coreURLs := make(map[string]string)
 	for i := range cfg.Outputs {
 		output := &cfg.Outputs[i]
+		if !namePattern.MatchString(output.ID) {
+			return fmt.Errorf("第 %d 个输出的名称（outputs[].id）须为 1 到 64 个英文字母、数字、下划线或短横线，并以字母或数字开头。", i+1)
+		}
 		if _, exists := outputs[output.ID]; exists {
-			return fmt.Errorf("duplicate output %q", output.ID)
+			return fmt.Errorf("输出 %q 的名称（id）重复。请给两个输出使用不同的名称，并更新相关路由。", output.ID)
 		}
 		switch output.Protocol {
 		case OneBot11:
 			if output.Mode != ForwardListen && output.Mode != ReverseDial {
-				return fmt.Errorf("output %q has an unsupported WS mode", output.ID)
+				return fmt.Errorf("OneBot 输出 %q 的「连接方式」（ws_mode）请选择正向监听（forward-listen）或反向拨号（reverse-dial）。", output.ID)
 			}
 			if err := output.Endpoint.validate(host, port, output.Mode == ForwardListen, secrets); err != nil {
-				return err
+				return fmt.Errorf("「输出管理」%w", err)
 			}
 			if output.ListenPath != "" && !validListenPath(strings.ReplaceAll(output.ListenPath, "{input}", "input")) {
-				return fmt.Errorf("invalid listener path for output %q", output.ID)
+				return fmt.Errorf("输出 %q 的「监听路径」（listen_path）无效或占用了网关保留路径。请改用例如 /astrbot/{input}，或留空使用默认路径。", output.ID)
 			}
 		case GScore:
-			if !namePattern.MatchString(output.ID) || output.Mode != "" || output.ListenPath != "" {
-				return fmt.Errorf("invalid gscore output %q", output.ID)
+			if output.Mode != "" || output.ListenPath != "" {
+				return fmt.Errorf("gscore 输出 %q 使用直连。请移除 ws_mode 和 listen_path，只在「目标 WebSocket 地址」（url）填写 gscore 的完整地址。", output.ID)
 			}
 			output.Token = credential(secrets, output.TokenRef, output.TokenEnv)
 			if output.TokenEnv != "" && output.Token == "" {
-				return fmt.Errorf("missing gscore token for %q", output.ID)
+				return fmt.Errorf("gscore 输出 %q 的 token_env 未提供令牌。请在「输出管理」填写「连接令牌」，或设置该环境变量。", output.ID)
 			}
 			u, err := wsURL(output.URL)
 			if err != nil || strings.ContainsAny(output.URL, "{}") {
-				return fmt.Errorf("invalid gscore WebSocket URL for %q", output.ID)
+				return fmt.Errorf("gscore 输出 %q 的「目标 WebSocket 地址」（url）须为完整的 ws:// 或 wss:// 地址。请将令牌填入独立的令牌栏，并将地址模板替换为实际路径。", output.ID)
 			}
 			address := strings.ToLower(u.Host) + u.EscapedPath()
 			if existing := coreURLs[address]; existing != "" {
-				return fmt.Errorf("gscore outputs %q and %q have the same address; select one output in both routes to share it", existing, output.ID)
+				return fmt.Errorf("gscore 输出 %q 与 %q 的「目标 WebSocket 地址」（url）相同。要共用连接，请让相关路由选择同一个输出。要独立连接，请为其中一个配置不同的目标地址。", existing, output.ID)
 			}
 			coreURLs[address] = output.ID
 		default:
-			return fmt.Errorf("output %q has an unsupported protocol", output.ID)
+			return fmt.Errorf("输出 %q 的「输出类型」（protocol）请选择 OneBot v11（onebot11）或 gsuid_core 直连（gscore）。", output.ID)
 		}
 		outputs[output.ID] = *output
 	}
 	routes := make(map[[2]string]bool, len(cfg.Routes))
-	coreBots := make(map[[2]string]bool)
-	for _, route := range cfg.Routes {
+	coreBots := make(map[[2]string]string)
+	for i, route := range cfg.Routes {
 		input, exists := inputs[route.From]
-		if !exists || len(route.Targets()) == 0 || (route.To != "" && len(route.Outputs) != 0) {
-			return fmt.Errorf("route %q requires a configured input and at least one output", route.From)
+		if !exists {
+			if namePattern.MatchString(route.From) {
+				return fmt.Errorf("第 %d 条路由引用的输入 %q 不存在（from）。请在「路由管理」重选「来源输入」，或恢复对应输入。", i+1, route.From)
+			}
+			return fmt.Errorf("第 %d 条路由缺少有效的「来源输入」（from）。请选择已配置的输入。", i+1)
+		}
+		routeName := fmt.Sprintf("第 %d 条路由（来源 %q）", i+1, route.From)
+		if len(route.Targets()) == 0 {
+			return fmt.Errorf("%s缺少「目标输出」。请在 outputs 中至少选择一个已配置的输出。", routeName)
+		}
+		if route.To != "" && len(route.Outputs) != 0 {
+			return fmt.Errorf("%s同时填写了旧字段 to 和目标输出列表 outputs。请保留 outputs，删除 to。", routeName)
+		}
+		if len(route.SendGroupViaGroups) != 0 && route.SendGroupVia == "" {
+			return fmt.Errorf("%s填写了「官 Bot 发送群号」（send_group_via_groups）。请在「群消息发送 Bot」选择官 Bot，或清空代发群号。", routeName)
+		}
+		for index, group := range route.SendGroupViaGroups {
+			if !validQQID(group) {
+				return fmt.Errorf("%s的「官 Bot 发送群号」（send_group_via_groups）第 %d 项无效。请填写真实 QQ 群号。", routeName, index+1)
+			}
+		}
+		if route.SendGroupVia != "" {
+			if input.Protocol != OneBot11 || input.IdentitySource != RealQQ {
+				return fmt.Errorf("%s的「群消息发送 Bot」（send_group_via）要求来源是提供真实 QQ 号的 OneBot 输入。请重选来源，或将发送 Bot 设为「沿用来源 Bot」。", routeName)
+			}
+			if !route.AllowActions {
+				return fmt.Errorf("%s已指定「群消息发送 Bot」（send_group_via），但「允许下游 API 回程」（allow_actions）已关闭。请开启 API 回程，或将发送 Bot 设为「沿用来源 Bot」。", routeName)
+			}
+			sender, exists := inputs[route.SendGroupVia]
+			if !exists {
+				if namePattern.MatchString(route.SendGroupVia) {
+					return fmt.Errorf("%s指定的群消息发送 Bot %q 不存在。请重选已配置的 QQ 官方输入，或选「沿用来源 Bot」。", routeName, route.SendGroupVia)
+				}
+				return fmt.Errorf("%s的「群消息发送 Bot」（send_group_via）无效。请选择已配置的 QQ 官方输入。", routeName)
+			}
+			if sender.Protocol != QQOfficial {
+				return fmt.Errorf("%s的发送 Bot %q 与「群消息发送 Bot」要求的 QQ 官方协议冲突。请改选一个 QQ 官方 Bot，或选「沿用来源 Bot」。", routeName, sender.ID)
+			}
+			if !sender.AllowProactive {
+				return fmt.Errorf("%s指定了发送 Bot %q，但它的「允许主动发送」（allow_proactive）已关闭。请在「输入管理」开启该选项，或在路由里更换发送 Bot。", routeName, sender.ID)
+			}
 		}
 		for _, target := range route.Targets() {
 			output, exists := outputs[target]
 			key := [2]string{route.From, target}
-			if !exists || routes[key] {
-				return fmt.Errorf("unknown or duplicate route %q to %q", route.From, target)
+			if !exists {
+				if namePattern.MatchString(target) {
+					return fmt.Errorf("%s引用的输出 %q 不存在。请重选「目标输出」，或恢复对应输出。", routeName, target)
+				}
+				return fmt.Errorf("%s的「目标输出」（outputs）含无效名称。请选择已配置的输出。", routeName)
+			}
+			if routes[key] {
+				return fmt.Errorf("来源 %q 到输出 %q 的路由重复。请将配置合并到同一条路由，每个目标只选一次。", route.From, target)
 			}
 			routes[key] = true
 			if output.ListenPath != "" {
 				path := strings.ReplaceAll(output.ListenPath, "{input}", route.From)
-				if !validListenPath(path) || listeners[path] {
-					return fmt.Errorf("invalid or duplicate listener path for route %q to %q", route.From, target)
+				if !validListenPath(path) {
+					return fmt.Errorf("%s的输出 %q 展开后的监听路径（listen_path）无效。请在「输出管理」更换该路径，或留空使用默认路径。", routeName, target)
 				}
-				listeners[path] = true
+				if existing := listeners[path]; existing != "" {
+					return fmt.Errorf("%s的输出 %q 的监听路径与%s重复。请更换路径。同一输出接收多个来源时，可在 listen_path 中加上 {input}。", routeName, target, existing)
+				}
+				listeners[path] = fmt.Sprintf("来源 %q 到输出 %q 的 listen_path", route.From, target)
 			}
 			if output.Protocol == GScore {
 				bot := [2]string{target, input.SelfID}
-				if coreBots[bot] {
-					return fmt.Errorf("inputs sharing gscore output %q must have distinct self_id values", target)
+				if existing := coreBots[bot]; existing != "" {
+					return fmt.Errorf("输入 %q 与 %q 共用 gscore 输出 %q，且 OneBot self_id 重复。请为两个输入设置各自的 Bot ID，或改用不同的 gscore 输出。", existing, route.From, target)
 				}
-				coreBots[bot] = true
+				coreBots[bot] = route.From
 			}
 		}
 		if route.ImplicitReply != "" && route.ImplicitReply != "unique-recent" {
-			return fmt.Errorf("invalid implicit_reply in route %q to %q", route.From, route.To)
+			return fmt.Errorf("%s的「隐式回复」（implicit_reply）请选择关闭，或使用唯一的最近消息（unique-recent）。", routeName)
 		}
-		for _, kind := range route.Events {
+		for index, kind := range route.Events {
 			switch kind {
 			case "message", "message_sent", "notice", "request":
 			default:
-				return fmt.Errorf("unsupported route event type %q", kind)
+				return fmt.Errorf("%s的「允许转发的事件」（events）第 %d 项无效。可选 message、message_sent、notice 或 request。", routeName, index+1)
 			}
 		}
-		for _, ids := range [][]string{route.Groups, route.Users} {
-			for _, id := range ids {
+		for _, scope := range []struct {
+			field, label string
+			ids          []string
+		}{{"groups", "群号过滤", route.Groups}, {"users", "用户过滤", route.Users}} {
+			for index, id := range scope.ids {
 				if !validID(id) || (input.Protocol == QQOfficial && !validQQID(id)) {
-					return fmt.Errorf("invalid filter ID in route %q to %q", route.From, route.To)
+					if input.Protocol == QQOfficial {
+						return fmt.Errorf("%s的「%s」（%s）第 %d 项无效。QQ 官方输入须填写真实群号或 QQ 号。", routeName, scope.label, scope.field, index+1)
+					}
+					return fmt.Errorf("%s的「%s」（%s）第 %d 项无效。请填写下游看到的正整数 ID。", routeName, scope.label, scope.field, index+1)
 				}
 			}
 		}
 	}
 	for _, in := range cfg.Inputs {
 		if in.Mode == ForwardDial && dialHitsListener(in.URL, host, port, listeners) {
-			return fmt.Errorf("dial endpoint %q points back to this gateway", in.ID)
+			return fmt.Errorf("输入 %q 的 WebSocket 地址（url）指向网关自己的监听接口。请填写上游适配器的 WebSocket 地址，或切换到反向监听。", in.ID)
 		}
 	}
 	for _, out := range cfg.Outputs {
 		if out.Mode == ReverseDial && dialHitsListener(out.URL, host, port, listeners) {
-			return fmt.Errorf("dial endpoint %q points back to this gateway", out.ID)
+			return fmt.Errorf("输出 %q 的 WebSocket 地址（url）指向网关自己的监听接口。请填写下游应用的 WebSocket 地址，或切换到正向监听。", out.ID)
 		}
 	}
 	m := cfg.Matching
+	for index, id := range m.ObservationInputs {
+		input, exists := inputs[id]
+		if !exists {
+			if namePattern.MatchString(id) {
+				return fmt.Errorf("「静默匹配 → 观察实例白名单」（matching.observation_inputs）中的输入 %q 不存在。请更新该名称或从名单移除。", id)
+			}
+			return fmt.Errorf("「静默匹配 → 观察实例白名单」（matching.observation_inputs）第 %d 项名称无效。请填写已配置的输入名称。", index+1)
+		}
+		if !m.Observes(input) {
+			return fmt.Errorf("「静默匹配 → 观察实例白名单」（matching.observation_inputs）中的输入 %q 必须使用 OneBot v11（protocol）并提供真实 QQ ID（identity_source: real-qq）。请选择符合条件的输入，或移除该项。", id)
+		}
+	}
 	switch m.Mode {
 	case "off":
 	case "shadow", "auto":
-		if cfg.Storage.SQLite == "" || len(apps) == 0 {
-			return fmt.Errorf("matching requires storage.sqlite and an official QQ input")
+		if cfg.Storage.SQLite == "" {
+			return fmt.Errorf("「静默匹配」当前模式为 %s，需要 SQLite 文件（storage.sqlite）。请在「身份数据库」填写路径，或将匹配模式设为关闭（off）。", m.Mode)
 		}
-		observers := 0
-		for _, input := range cfg.Inputs {
-			if input.Observes() {
-				observers++
-			}
+		if len(apps) == 0 {
+			return fmt.Errorf("「静默匹配」当前模式为 %s，需要 QQ 官方输入。请在「输入管理」添加一个 QQ 官方 Bot，或将匹配模式设为关闭（off）。", m.Mode)
 		}
-		if observers == 0 {
-			return fmt.Errorf("matching requires a real QQ observation input")
+		if !slices.ContainsFunc(cfg.Inputs, m.Observes) {
+			return fmt.Errorf("「静默匹配」当前模式为 %s，但没有可用的观察输入。请在「观察实例白名单」（matching.observation_inputs）填写一个提供真实 QQ 号的 OneBot 输入名称，或将匹配模式设为关闭（off）。", m.Mode)
 		}
 	default:
-		return fmt.Errorf("invalid matching mode")
+		return fmt.Errorf("「静默匹配 → 匹配模式」（matching.mode）请选择关闭（off）、仅观察（shadow）或自动绑定（auto）。")
 	}
-	if m.PairWindow < 25*time.Millisecond || m.PairWindow > 10*time.Second ||
-		m.EventTTL <= 2*m.PairWindow || m.EventTTL > time.Minute ||
-		m.EvidenceTTL < m.EventTTL || m.EvidenceTTL > 30*24*time.Hour ||
-		m.Successes < 2 || m.Successes > 100 ||
-		m.GroupSuccesses < 2 || m.GroupSuccesses > 100 || m.GroupSenders < 1 || m.GroupSenders > m.GroupSuccesses ||
-		m.Distance < 0 || m.Distance > 16 || len(m.DefaultHashes) > 256 {
-		return fmt.Errorf("invalid matching limits")
+	if m.PairWindow < 25*time.Millisecond || m.PairWindow > 10*time.Second {
+		return fmt.Errorf("配对窗口（matching.pair_window）须在 25ms 到 10s 之间。")
 	}
-	for _, id := range m.ObservationInputs {
-		if !inputs[id].Observes() {
-			return fmt.Errorf("matching input %q is not an observation input", id)
-		}
+	if m.EventTTL <= 2*m.PairWindow || m.EventTTL > time.Minute {
+		return fmt.Errorf("待配对事件保留时间（matching.event_ttl）须大于配对窗口（matching.pair_window）的两倍（当前为 %s），且最多 1m。请调整保留时间或缩短配对窗口。", 2*m.PairWindow)
 	}
-	for _, hash := range m.DefaultHashes {
+	if m.EvidenceTTL < m.EventTTL || m.EvidenceTTL > 30*24*time.Hour {
+		return fmt.Errorf("匹配证据保留时间（matching.evidence_ttl）须至少等于事件保留时间（matching.event_ttl，当前为 %s），且最多 720h。", m.EventTTL)
+	}
+	if m.Successes < 2 || m.Successes > 100 {
+		return fmt.Errorf("用户匹配证据数（matching.successes_required）须在 2 到 100 之间。")
+	}
+	if m.GroupSuccesses < 2 || m.GroupSuccesses > 100 {
+		return fmt.Errorf("群匹配证据数（matching.group_successes_required）须在 2 到 100 之间。")
+	}
+	if m.GroupSenders < 1 || m.GroupSenders > m.GroupSuccesses {
+		return fmt.Errorf("群匹配不同发送者数（matching.group_senders_required）须至少为 1，且不能超过群匹配证据数（matching.group_successes_required，当前为 %d）。", m.GroupSuccesses)
+	}
+	if m.Distance < 0 || m.Distance > 16 {
+		return fmt.Errorf("最大 pHash 汉明距离（matching.phash_max_distance）须在 0 到 16 之间。")
+	}
+	if len(m.DefaultHashes) > 256 {
+		return fmt.Errorf("「默认头像 pHash」（matching.default_avatar_phashes）最多可填 256 项，请缩减列表。")
+	}
+	for index, hash := range m.DefaultHashes {
 		if _, err := strconv.ParseUint(hash, 16, 64); err != nil || len(hash) != 16 {
-			return fmt.Errorf("default_avatar_phashes must contain 16 digit hexadecimal hashes")
+			return fmt.Errorf("「默认头像 pHash」（matching.default_avatar_phashes）第 %d 项无效。请填写 16 位十六进制值。", index+1)
 		}
 	}
 	return nil
@@ -529,27 +663,27 @@ func loopback(host string) bool {
 }
 
 func (endpoint *Endpoint) validate(listenHost, listenPort string, listening bool, secrets map[string]string) error {
-	if !namePattern.MatchString(endpoint.ID) {
-		return fmt.Errorf("invalid endpoint ID %q", endpoint.ID)
-	}
 	if endpoint.TokenEnv != "" || endpoint.TokenRef != "" {
 		endpoint.Token = credential(secrets, endpoint.TokenRef, endpoint.TokenEnv)
 		if endpoint.Token == "" || strings.ContainsAny(endpoint.Token, " \t\r\n") {
-			return fmt.Errorf("missing or invalid token in %q for %q", endpoint.TokenEnv, endpoint.ID)
+			return fmt.Errorf("%q 的连接令牌缺失或包含空白。请重新填写令牌，或检查 token_env、token_ref 所引用的凭证。", endpoint.ID)
 		}
 	}
 	if listening {
 		if endpoint.URL != "" {
-			return fmt.Errorf("listener %q cannot specify a dial URL", endpoint.ID)
+			return fmt.Errorf("%q 的「连接方式」是监听，和拨号地址（url）冲突。请清空 url，或将连接方式改为拨号。", endpoint.ID)
 		}
 		if !loopback(listenHost) && endpoint.Token == "" {
-			return fmt.Errorf("listener %q requires a token for non-loopback access", endpoint.ID)
+			return fmt.Errorf("%q 使用监听模式，且「网关服务 → 监听地址」（listen）允许外部连接。请为该实例设置连接令牌，或将网关监听地址改为本机回环地址。", endpoint.ID)
 		}
 		return nil
 	}
 	u, err := wsURL(endpoint.URL)
-	if err != nil || endpoint.ListenPath != "" {
-		return fmt.Errorf("invalid dial settings for %q", endpoint.ID)
+	if err != nil {
+		return fmt.Errorf("%q 的 WebSocket 地址（url）须为完整的 ws:// 或 wss:// 地址。请将凭证放入独立的令牌栏。", endpoint.ID)
+	}
+	if endpoint.ListenPath != "" {
+		return fmt.Errorf("%q 的「连接方式」是拨号，和监听路径（listen_path）冲突。请清空监听路径，或将连接方式改为监听。", endpoint.ID)
 	}
 	local := loopback(u.Hostname()) || u.Hostname() == listenHost
 	port := u.Port()
@@ -560,7 +694,7 @@ func (endpoint *Endpoint) validate(listenHost, listenPort string, listening bool
 		}
 	}
 	if local && port == listenPort && strings.HasPrefix(u.Path, "/onebot/") {
-		return fmt.Errorf("dial endpoint %q points back to this gateway", endpoint.ID)
+		return fmt.Errorf("%q 的 WebSocket 地址（url）指向网关自己的 OneBot 监听接口。请填写对端应用的地址。", endpoint.ID)
 	}
 	return nil
 }
@@ -569,15 +703,15 @@ func wsURL(value string) (*url.URL, error) {
 	u, err := url.Parse(value)
 	if err != nil || u.Hostname() == "" || (u.Scheme != "ws" && u.Scheme != "wss") ||
 		u.User != nil || u.Fragment != "" || u.Query().Has("access_token") || u.Query().Has("token") {
-		return nil, fmt.Errorf("expected a ws or wss URL without credentials")
+		return nil, fmt.Errorf("请填写完整的 ws:// 或 wss:// 地址，并将凭证填入独立的令牌栏。")
 	}
 	return u, nil
 }
 
-func dialHitsListener(address, host, port string, paths map[string]bool) bool {
+func dialHitsListener(address, host, port string, paths map[string]string) bool {
 	u, _ := url.Parse(address)
 	return u != nil && (loopback(u.Hostname()) || u.Hostname() == host) &&
-		u.Port() == port && (paths[u.Path] || strings.HasPrefix(u.Path, "/_hashinex/"))
+		u.Port() == port && (paths[u.Path] != "" || strings.HasPrefix(u.Path, "/_hashinex/"))
 }
 
 var listenerPath = regexp.MustCompile(`^(/[A-Za-z0-9_.~-]+)+$`)
