@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hashinex · 管理控制台</title>
+  <link rel="stylesheet" href="admin.css">
+  <script src="admin.js" type="module"></script>
+</head>
+<body>
+  <div class="login-screen" id="login-screen">
+    <div class="login-brand">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Hashinex</div>
+      <div class="login-topology" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <span class="login-protocol">QQ 官方 Bot <b>·</b> OneBot v11</span>
+    </div>
+    <div class="login-content">
+      <form class="login-form" id="login">
+        <h1>登录管理控制台</h1>
+        <label for="token">管理令牌</label>
+        <input id="token" type="password" autocomplete="current-password" autofocus>
+        <button class="primary" type="submit">登录</button>
+        <p class="muted">使用管理令牌登录。本机首次设置模式可留空。</p>
+      </form>
+    </div>
+  </div>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div>Hashinex<small>管理控制台</small></div></div>
+      <nav aria-label="控制台导航">
+        <div class="nav-group">
+          <span>网关</span>
+          <button type="button" data-page="overview" aria-current="page"><i aria-hidden="true">▦</i>仪表盘</button>
+          <button type="button" data-page="inputs"><i aria-hidden="true">↳</i>输入管理</button>
+          <button type="button" data-page="outputs"><i aria-hidden="true">↗</i>输出管理</button>
+          <button type="button" data-page="routes"><i aria-hidden="true">⇄</i>路由管理</button>
+        </div>
+        <div class="nav-group">
+          <span>身份解析</span>
+          <button type="button" data-page="identities"><i aria-hidden="true">◎</i>身份映射</button>
+          <button type="button" data-page="candidates"><i aria-hidden="true">◇</i>匹配管理</button>
+        </div>
+        <div class="nav-group">
+          <span>运维</span>
+          <button type="button" data-page="logs"><i aria-hidden="true">≡</i>运行日志</button>
+          <button type="button" data-page="settings"><i aria-hidden="true">⚙</i>系统设置</button>
+        </div>
+      </nav>
+      <div class="sidebar-footer"><span class="signal"></span><span id="gateway-status">正在连接</span></div>
+    </aside>
+    <div class="workspace-body">
+      <header class="topbar">
+        <span>控制台 <span class="breadcrumb-slash">/</span> <strong id="breadcrumb">仪表盘</strong></span>
+        <div class="actions"><span class="refresh-time" id="refresh-time"></span><button type="button" id="refresh">刷新</button><button type="button" id="restart" hidden>重启网关</button><button id="logout" type="button">退出</button></div>
+      </header>
+      <main id="main">
+        <div class="save-bar" id="draft-bar" hidden>
+          <span id="draft-description">有未保存的配置更改</span>
+          <div class="actions"><button type="button" id="discard">撤销草稿</button><button type="button" class="primary" id="save">保存配置</button></div>
+        </div>
+        <p class="restart-note" id="restart-note" role="status" hidden></p>
+        <section id="overview">
+          <div class="page-heading"><div><h1>网关概览</h1><p>连接状态、消息流量与身份匹配</p></div><span class="live-label"><span class="signal"></span>每 3 秒刷新</span></div>
+          <div class="metrics" id="metrics"></div>
+          <div class="overview-grid">
+            <article class="panel traffic-panel">
+              <div class="panel-heading"><div><h2>消息流量</h2><p>每秒接收的消息</p></div><span id="sample-range" class="quiet-tag"></span></div>
+              <canvas id="traffic" role="img" aria-label="每秒接收消息数趋势"></canvas>
+            </article>
+            <article class="panel">
+              <div class="panel-heading"><div><h2>身份匹配</h2><p>当前运行参数和统计</p></div><span id="matching-mode" class="badge"></span></div>
+              <dl class="health-details" id="matching-metrics"></dl>
+              <button type="button" class="text-button" data-open="candidates">查看匹配候选 <span aria-hidden="true">→</span></button>
+            </article>
+          </div>
+          <article class="panel">
+            <div class="panel-heading"><div><h2>连接状态</h2><p>输入实例及各路由的输出会话</p></div><button type="button" data-open="inputs">管理连接</button></div>
+            <div class="table-wrap"><table id="connections-table"></table></div>
+          </article>
+        </section>
+        <section id="inputs" hidden>
+          <div class="page-heading"><div><h1>输入管理</h1><p>接入 QQ 官方 Bot 和 OneBot v11 适配器</p></div><button class="primary" type="button" data-add="inputs">＋ 新增输入</button></div>
+          <article class="panel"><div class="table-wrap"><table id="input-list"></table></div></article>
+        </section>
+        <section id="outputs" hidden>
+          <div class="page-heading"><div><h1>输出管理</h1><p>每个 gscore 输出对应一个 WebSocket 地址。多只 Bot 可在路由里选择同一个输出。</p></div><button class="primary" type="button" data-add="outputs">＋ 新增输出</button></div>
+          <article class="panel"><div class="table-wrap"><table id="output-list"></table></div></article>
+        </section>
+        <section id="routes" hidden>
+          <div class="page-heading"><div><h1>路由管理</h1><p>查看消息从哪只 Bot 进入、发给哪些后端。</p></div><button class="primary" type="button" data-add="routes">＋ 新增路由</button></div>
+          <article class="panel">
+            <div class="toolbar">
+              <select id="route-from-filter" aria-label="按来源输入筛选" data-empty="全部输入"></select>
+              <select id="route-to-filter" aria-label="按目标输出筛选" data-empty="全部输出"></select>
+            </div>
+            <div class="table-wrap"><table id="route-list"></table></div>
+          </article>
+        </section>
+        <section id="identities" hidden>
+          <div class="page-heading"><div><h1>身份映射</h1><p>按真实 QQ 号或群号展开全部关联身份，人工绑定即时生效。</p></div><button class="primary" type="button" id="new-binding">＋ 人工绑定</button></div>
+          <article class="panel">
+            <form id="search" class="toolbar">
+              <input id="identity-query" type="search" aria-label="查询身份" placeholder="OpenID、QQ 号、群号或命名空间">
+              <select id="identity-kind" aria-label="身份类型"><option value="">全部类型</option><option value="user">用户</option><option value="group">群</option></select>
+              <button type="submit">查询</button>
+            </form>
+            <div class="table-wrap"><table id="identity-list"></table></div>
+            <div class="pager" id="identity-pager"></div>
+          </article>
+        </section>
+        <section id="candidates" hidden>
+          <div class="page-heading"><div><h1>匹配管理</h1><p>查看消息配对、头像校验进度和身份冲突。</p></div><button type="button" id="edit-matching">匹配参数</button></div>
+          <article class="panel">
+            <form class="toolbar" id="candidate-search">
+              <input id="candidate-query" type="search" aria-label="检索匹配记录" placeholder="OpenID、QQ 号、群号或命名空间">
+              <select id="candidate-filter" aria-label="候选状态"><option value="">全部状态</option><option value="frozen">仅看冲突</option><option value="bound">已绑定</option><option value="collecting">待确认</option></select>
+              <button type="submit">查询</button>
+              <span class="muted" id="candidate-summary"></span>
+            </form>
+            <div class="table-wrap"><table id="candidate-list"></table></div>
+            <div class="pager" id="candidate-pager"></div>
+          </article>
+        </section>
+        <section id="logs" hidden>
+          <div class="page-heading"><div><h1>运行日志</h1><p>筛选当前网关进程最近的结构化日志。</p></div></div>
+          <article class="panel">
+            <div class="toolbar">
+              <input id="log-filter" type="search" aria-label="查找日志" placeholder="搜索输入、输出或错误原因">
+              <select id="log-level" aria-label="日志级别"><option value="">全部级别</option><option>ERROR</option><option>WARN</option><option>INFO</option><option>DEBUG</option></select>
+              <span class="muted" id="log-count"></span>
+            </div>
+            <div class="table-wrap"><table id="log-list"></table></div>
+          </article>
+        </section>
+        <section id="settings" hidden>
+          <div class="page-heading"><div><h1>系统设置</h1><p>配置监听、数据库、匹配、队列和日志。</p></div></div>
+          <div class="settings-grid" id="settings-list"></div>
+          <details class="panel yaml-panel" id="yaml-panel">
+            <summary>高级 YAML 编辑器</summary>
+            <form id="editor">
+              <label for="yaml">配置文件</label>
+              <textarea id="yaml" spellcheck="false" rows="18"></textarea>
+              <div class="actions"><button type="button" id="reload-yaml">重新读取</button><button class="primary" type="submit">校验并保存 YAML</button></div>
+            </form>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
+  <dialog id="edit-dialog" aria-labelledby="edit-title">
+    <form id="edit-form">
+      <div class="dialog-heading"><div><h2 id="edit-title"></h2><p id="edit-description" class="muted"></p></div><button type="button" class="close" id="close-dialog" aria-label="关闭">×</button></div>
+      <div class="form-fields" id="edit-fields"></div>
+      <p id="edit-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-footer"><button type="button" id="cancel-dialog">取消</button><button type="submit" class="primary" id="apply-edit">加入草稿</button></div>
+    </form>
+  </dialog>
+  <p id="status" class="notice" role="status" hidden></p>
+</body>
+</html>

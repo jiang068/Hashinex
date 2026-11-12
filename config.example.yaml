@@ -1,0 +1,35 @@
+# 复制为可执行文件同目录下的 config/config.yaml。
+# 首次启动加 -admin-setup，在 WebUI 设置管理令牌、Bot 密钥和路由。
+listen: "127.0.0.1:6700"
+log_level: info
+
+storage:
+  sqlite: "../data/hashinex.sqlite"
+logging:
+  file: "../data/hashinex.jsonl"
+
+inputs: []
+outputs: []
+routes: []
+
+# 可选的 OneBot v11 输入、输出和路由示例。
+# 使用此示例时，把下面各段替换到对应的空列表位置，并填写真实的 self_id。
+# inputs:
+#   - id: napcat
+#     protocol: onebot11
+#     ws_mode: reverse-listen
+#     role: active
+#     identity_source: real-qq
+#     self_id: "10001"
+# outputs:
+#   - id: astrbot
+#     protocol: onebot11
+#     ws_mode: forward-listen
+#   - id: gscore
+#     protocol: gscore
+#     url: "ws://127.0.0.1:8765/ws/hashinex"
+# routes:
+#   - from: napcat
+#     outputs: [astrbot, gscore]
+#     events: [message]
+#     allow_actions: true

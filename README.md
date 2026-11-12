@@ -1,147 +1,93 @@
 # Hashinex
 
-> 面向 QQ 官方 Bot 与 OneBot v11 生态的多实例网关、身份统一与静默匹配中间件。
+Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 OneBot v11 事件，把同一用户在不同官方 Bot 下的 OpenID 关联到真实 QQ 号，再按路由将事件送往 AstrBot、gsuid_core（gscore）等后端。后端可继续用真实 QQ 号查找原有业务数据，身份映射由 Hashinex 自己的 SQLite 管理。
 
-**项目状态：规划 / 开发中。** 本文描述目标架构和待办事项，功能暂未实现。
+项目仍在功能迭代中。QQ 官方 Bot 的群聊、绑定后的私聊和 gscore 直连已完成实机联调。可接收的事件和可调用的动作取决于各 Bot 的平台权限。
 
-Hashinex 计划使用 **Go** 开发，独立部署，不依赖 AstrBot、gscore 或其他特定业务框架。它接收 QQ 官方 Bot 的 WS/HTTP 事件及 OneBot v11 上游消息，统一处理身份和路由，再向一个或多个 OneBot v11 下游提供服务。
+## 快速启动
 
-## 为什么需要 Hashinex？
+需要 Go 1.26.11 或更高版本。在源码根目录执行以下命令。Windows 示例将开发用可执行文件和运行目录放在源码仓库旁边。
 
-QQ 官方 Bot 使用 OpenID 标识用户和群聊。不同官方 Bot 对同一 QQ 用户可能使用不同 OpenID；而历史 OneBot 系统通常以真实 QQ 号存储绑定、积分和其他数据。直接将 OpenID 哈希成数字只能解决字段格式兼容，无法保证跨 Bot 的同一身份。
-
-Hashinex 的目标是在**不修改下游业务数据库**的前提下，借助可选的静默观察 Bot，将官方 OpenID 逐步关联到真实 QQ 号，使多个 Bot 可以复用已有用户身份。
-
-## 目标能力
-
-- **两类上游**：QQ 官方 Bot（原生 Gateway WebSocket + HTTP API）与 OneBot v11（包括 NapCat、SnowLuma、适配器输出）。
-- **统一下游**：面向 gscore、AstrBot、Koishi、NoneBot 等输出 OneBot v11；支持多个独立下游。
-- **多实例路由**：按上游、下游、事件类型及可选群/用户规则配置分流。
-- **身份统一**：独立保存 `(AppID, OpenID) ↔ QQ 号`、群映射、虚拟 ID 和证据记录；保留可追溯、可撤销的绑定。
-- **静默观察**：指定真实 QQ OneBot 实例仅参与身份识别，不向业务下游转发事件，也不主动回复。
-- **自动匹配**：关联跨 Bot 的同一条消息，再用头像 Hash 验证；默认要求 **3 条不同消息**的连续有效匹配，且无竞争候选与冲突。
-- **双向 API**：处理下游请求、`echo` 关联、`self_id` 选择、消息 ID 与用户/群 ID 的反向转换。
-- **可靠性**：异步匹配、有限队列、超时与背压、故障隔离、自动重连、结构化日志；匹配异常不阻塞 WS 收发。
-- **独立部署**：Go 二进制、SQLite（WAL）、可配置文件和管理 WebUI（规划）。
-
-## 目标架构
-
-```mermaid
-flowchart LR
-    O[QQ 官方 Bot WS/HTTP] --> A[官方协议适配器]
-    N[NapCat / SnowLuma / OneBot] --> B[OneBot v11 适配器]
-    A --> C[事件总线 / 路由引擎]
-    B --> C
-    C <--> I[身份解析与映射]
-    I <--> D[(SQLite)]
-    B -. 观察事件 .-> M[静默匹配引擎]
-    A -. 官方事件 .-> M
-    M --> I
-    C <--> X[OneBot v11 双向网关]
-    X <--> G[gscore]
-    X <--> K[AstrBot / Koishi / NoneBot]
+```powershell
+$run = "../cache/hashinex-dev"
+New-Item -ItemType Directory -Force "$run/config" | Out-Null
+go build -trimpath -o "$run/hashinex.exe" ./cmd/hashinex
+if (!(Test-Path "$run/config/config.yaml")) {
+    Copy-Item config.example.yaml "$run/config/config.yaml"
+}
+& "$run/hashinex.exe" -check
+& "$run/hashinex.exe" -admin-setup
 ```
 
-> 图示为逻辑架构。实际实现需保证观察事件不会进入业务下游；官方 API 的请求/响应需要沿原上游实例反向路由。
+在 Linux 或 macOS 上，使用同一构建命令并省略文件名的 `.exe` 后缀。运行时默认按可执行文件的位置找 `config/config.yaml`，也可以用 `-config` 指定其他 YAML。
 
-## 静默身份匹配（设计）
+1. 打开 [本地 WebUI](http://127.0.0.1:6700/admin/)。首次启动时留空登录，在「系统设置 → 管理访问」设置管理令牌。
+2. 在 WebUI 添加输入、输出和路由。QQ AppSecret、OneBot 令牌和 gscore 令牌都可在对应表单里保存。
+3. 保存草稿后点击「重启网关」应用变更。完成首次配置后，日常直接运行可执行文件。可通过 WebUI 或 `/healthz` 查看连接状态。
 
-1. 官方 Bot 和配置为观察模式的 OneBot 实例接收到同一条群消息。
-2. 根据时间窗口、规范化内容、事件特征及已知群映射关联事件；仅接受唯一候选。
-3. 观察实例提供真实 QQ 号，官方实例提供对应 OpenID。
-4. 获取双方头像，比较文件 Hash 与感知 Hash（例如 pHash）；相同头像**不是**独立的身份保证。
-5. 为 `(官方 Bot AppID, OpenID, QQ 号)` 记录一次有效证据；同一原始消息去重。
-6. 默认在证据有效期内连续 **3 次独立成功**，且不存在竞争候选、群映射矛盾或历史绑定冲突，才允许自动绑定。
-7. 绑定后入站统一使用真实 QQ 号；出站 API 按上游上下文反向映射为 OpenID。
+## 接入与路由
 
-**初始参数（待实测调优）**：消息时间窗口 ±2 秒、事件缓存 5 秒、证据有效期 24 小时、pHash 汉明距离不大于 4、确认阈值 3 次。以上均应可配置，**不代表已验证的准确率**。
-
-匹配失败时使用稳定且不与真实 QQ 号冲突的临时身份；头像接口故障不清零证据，明确冲突则冻结候选。正式自动绑定前应先运行影子模式，通过已知 QQ 身份统计误绑定情况。
-
-## 可靠性原则
-
-- WS 读写循环与头像下载、Hash 计算、数据库操作和下游处理分离。
-- 匹配失败不影响基础事件转发；已确认映射可缓存，未确认身份不得冒用其他用户的 QQ 号。
-- 每个连接和下游独立故障隔离，设置超时、心跳、重连与指数退避。
-- 使用有限容量队列；对观察证据、业务消息、API 响应采用不同的背压与丢弃/重试策略。
-- 日志记录连接、路由、匹配进度、冲突、队列积压及 API 错误；令牌和敏感信息脱敏。
-- 不承诺在无限故障时仍零丢包；对不可交付的业务消息应明确报告或记录失败。
-
-## TODO
-
-### P0 · 调研与设计
-
-- [ ] 审查参考项目源码、协议能力与开源许可证（BotShepherd、Gensokyo-NewQQ、OnebotNoa、qbob、WuwaIdMigration、gscore 等）。
-- [ ] 验证 QQ 官方 Gateway / HTTP API、头像获取、消息 ID 与身份字段的实际行为。
-- [ ] 定义模块接口、统一事件模型、身份命名空间和路由配置格式。
-- [ ] 设计 SQLite 表结构、唯一性约束、迁移及回滚机制。
-- [ ] 定义未绑定虚拟 ID 策略及双向 API 的上下文恢复机制。
-
-### P1 · OneBot 网关 MVP
-
-- [ ] 实现多实例 OneBot v11 上游连接与事件解析。
-- [ ] 实现多下游 WebSocket 连接与可配置路由。
-- [ ] 实现双向 API 转发、`echo` 隔离、超时与响应关联。
-- [ ] 正确处理 `self_id`、消息 ID、事件去重及反向路由。
-- [ ] 实现连接心跳、自动重连、优雅退出和配置加载。
-- [ ] 实现结构化日志、panic 恢复、有限队列与故障隔离。
-- [ ] 编写基础单元测试和双向转发集成测试。
-
-### P2 · QQ 官方 Bot 适配
-
-- [ ] 实现官方鉴权、Token 刷新、Gateway WS 生命周期管理。
-- [ ] 实现官方事件到 OneBot v11 的转换。
-- [ ] 实现下游 OneBot API 到官方 HTTP API 的转换与错误反馈。
-- [ ] 明确不支持的消息类型与 API 能力，避免伪造成功。
-- [ ] 测试多个官方 Bot 并发运行及异常恢复。
-
-### P3 · 身份与静默匹配
-
-- [ ] 实现独立身份数据库、缓存、审计和冲突检测。
-- [ ] 实现 `observe` 模式，保证观察事件不进入业务下游。
-- [ ] 实现跨 Bot 时间/内容消息配对及唯一候选判定。
-- [ ] 实现头像下载、SHA-256、dHash/pHash 比较与常见头像降权。
-- [ ] 实现按 `(AppID, OpenID, QQ号)` 独立计数、消息去重和证据过期。
-- [ ] 实现默认 3 次匹配自动绑定、冻结冲突与人工修正。
-- [ ] 实现群 OpenID ↔ 群号的独立验证。
-- [ ] 实现入站统一 ID 与出站 ID/API 反向转换。
-- [ ] 实现影子模式，测量误绑定率并设置启用门槛。
-- [ ] 验证 gscore 历史数据复用和常用业务 API 的兼容性。
-
-### P4 · 管理与运维
-
-- [ ] 实现 WebUI 登录鉴权、输入/输出/路由管理。
-- [ ] 实现身份查询、匹配进度、冲突审核及手动解绑。
-- [ ] 实现实时日志、指标、告警和日志轮转。
-- [ ] 实现数据库备份/恢复、配置校验和升级迁移。
-- [ ] 实现队列积压、下游慢消费者、数据库锁、网络抖动等故障注入测试。
-- [ ] 完成 Linux / Windows 跨平台构建及 GitHub Actions。
-- [ ] 编写部署、接入、配置和故障排查文档。
-
-## 技术选型（拟定）
-
-| 模块 | 方案 |
+| 场景 | 配置方式 |
 | --- | --- |
-| 后端 | Go |
-| 上游 | QQ 官方 WS/HTTP、OneBot v11 |
-| 下游 | OneBot v11 |
-| 存储 | SQLite + WAL |
-| 日志 | `log/slog` |
-| 配置 | YAML 或 TOML（待定） |
-| 管理界面 | WebUI，静态资源嵌入二进制（待定） |
-| 发布平台 | Linux amd64/arm64、Windows amd64（目标） |
+| QQ 官方 Bot | 每只 Bot 建一个独立输入，填写 AppID 和 AppSecret，选择官方 Gateway 或签名 Webhook。 |
+| NapCat、SnowLuma 等 OneBot 上游 | 建立 OneBot v11 输入。反向 WS 使用 WebUI 显示的完整地址，例如 `ws://127.0.0.1:6700/onebot/in/observer`。 |
+| AstrBot 等 OneBot 下游 | 建立 OneBot v11 输出，按下游配置选择监听或拨号。 |
+| gsuid_core 直连 | 建立独立的 gscore 输出，填写 gsuid_core 的完整 WS 地址，例如 `ws://127.0.0.1:8765/ws/hashinex`。多个输入选择同一个 gscore 输出时共用连接。 |
 
-## 参考项目
+一个输入可以通过路由同时发送到多个输出。路由可按事件、真实 QQ 号和群号过滤，也可控制下游 API 回程。各输入可按真实群号指定静默群和业务群。默认转换事件及身份，开启「原样透传事件」后保留上游格式和 ID，并记录转发计数。透传 QQ 官方输入时，下游需要能解析 QQ 官方原始 JSON。
 
-- [BotShepherd](https://github.com/search?q=BotShepherd&type=repositories) — OneBot 多路代理与 API 路由设计。
-- [Gensokyo-NewQQ](https://github.com/Te-River/Gensokyo-NewQQ) — Go 官方 QQ 协议适配。
-- [OnebotNoa](https://github.com/LeiSureLyYrsc/OnebotNoa) — Go OneBot 网关。
-- [qbob](https://github.com/Loping151/qbob) — 官方协议到 OneBot 的适配思路。
-- [Yunzai-QQBot-Plugin](https://github.com/dndss/Yunzai-QQBot-Plugin) — 头像校验与 OpenID 绑定。
-- WuwaIdMigration、gscore — 身份迁移与历史业务数据兼容性参考。
+## 身份映射与私聊
 
-以上仅供技术调研；使用第三方代码前须核查其许可证。
+- WebUI 以真实 QQ 号或真实群号聚合映射，展开后可查看各 Bot 的 OpenID。身份列表支持按来源群、QQ 号和 OpenID 检索，可选每页 10、20、50、100 或 200 条。
+- 静默匹配通过观察 Bot 对照同一群消息，再比对双方头像。所有非空文本均可参与配对。可先用 `shadow` 查看候选，再按需要开启 `auto`。观察范围内的群才登记待匹配身份，匹配成功后清理待匹配记录。已有绑定可在没有观察 Bot 的群里继续用于正常业务。
+- 官方 Bot 私聊默认关闭。开启后，已绑定用户的消息按路由转发。新用户可在与官 Bot 同在的群里使用一次性绑定码，网关通过观察 Bot 和头像确认身份，随后由官 Bot 在群里回复「绑定成功」。观察 Bot 不可用时，未绑定用户收到「私聊暂不可用」。
+
+## 配置、数据与迁移
+
+```text
+hashinex.exe
+config/
+  config.yaml
+  config.yaml.secrets.json
+data/
+  hashinex.sqlite
+  hashinex.jsonl
+```
+
+- [config.example.yaml](config.example.yaml) 是公开样例。实际配置可能包含 Bot 标识、群号和接入地址。WebUI 保存的密钥写入同目录的 `config.yaml.secrets.json`，YAML 里保存引用。
+- `data/` 保存身份映射、匹配记录、回复上下文和日志。数据库及日志可能包含账号标识和消息数据。实际运行目录及备份应放在源码仓库外。
+- 迁移时先正常停止网关，把整个 `config/` 和 `data/` 复制到目标可执行文件旁，运行 `hashinex -check` 后启动。自定义外部路径、环境变量密钥和下游业务库随各自的部署迁移。
+
+## 源码目录
+
+| 目录 | 内容 |
+| --- | --- |
+| `cmd/hashinex/` | 网关启动与运行管理 |
+| `cmd/hashinex-gscore/` | 可选的独立 gscore 协议适配器 |
+| `internal/gateway/` | 连接、路由、身份转换和内嵌 WebUI |
+| `internal/qqofficial/`、`internal/onebot/`、`internal/gscore/` | 协议接入和消息格式 |
+| `internal/config/`、`internal/matching/`、`internal/store/` | 配置、静默匹配和 SQLite 存储 |
+
+## 文档
+
+- [QQ 官方 Bot 接入](docs/qq-official.md)
+- [OneBot v11 接入](docs/onebot.md)
+- [gscore 直连与独立适配器](docs/gscore.md)
+- [静默匹配与头像验证](docs/matching.md)
+- [部署、迁移与故障排查](docs/operations.md)
+
+## 参考项目与致谢
+
+感谢以下项目的作者和维护者为 Hashinex 的实现提供参考。
+
+| 项目 | 参考内容 |
+| --- | --- |
+| [BotShepherd](https://github.com/Loping151/BotShepherd) | OneBot 多连接管理、事件分发和 `echo` 回程关联。 |
+| [Gensokyo-NewQQ](https://github.com/Te-River/Gensokyo-NewQQ) | 用 AppID 与 OpenID 构造 QQ 官方头像地址，以及群消息的被动回复上下文。 |
+| WuwaIdMigration | 用消息时间、文本和头像指纹配对用户的思路。 |
+| [napcat-plugin-gscore-adapter](https://github.com/xiowo/napcat-plugin-gscore-adapter) | OneBot 事件和消息段转换成 gscore 格式，以及 gscore 回复转回 OneBot 发送动作。 |
+| [gsuid_core（gscore）](https://github.com/Genshin-bots/gsuid_core) | 直连 WebSocket 的消息结构、回复关联，以及沿用 OneBot 平台标识与真实 QQ 号查询历史绑定。 |
 
 ## 许可证
 
-Apache-2.0
+Apache-2.0。见 [LICENSE](LICENSE) 与 [第三方依赖和版权声明](THIRD_PARTY_NOTICES.md)。
