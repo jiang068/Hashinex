@@ -14,6 +14,7 @@ import (
 	"hashinex/internal/gateway"
 	"hashinex/internal/logging"
 	"hashinex/internal/store"
+	"hashinex/internal/tempfiles"
 )
 
 type runtime struct {
@@ -21,6 +22,9 @@ type runtime struct {
 	listener     net.Listener
 	db           *store.Store
 	output       *logging.Output
+	shareHost    *shareHost
+	shareStore   *tempfiles.Store
+	shares       *tempfiles.Service
 	restartError string
 }
 
@@ -51,6 +55,7 @@ func run(ctx context.Context, cfg *config.Config, path string, localSetup bool) 
 				continue
 			}
 		}
+		next.activateShares()
 		active.closeExcept(next)
 		active = next
 	}
@@ -102,12 +107,21 @@ func (r *runtime) prepare(ctx context.Context, active *runtime) error {
 			return fmt.Errorf("open gateway logs: %w", err)
 		}
 	}
+	if err := r.prepareShares(ctx, active); err != nil {
+		return err
+	}
 	return ctx.Err()
 }
 
 func (r *runtime) closeExcept(next *runtime) {
 	if r.listener != nil {
 		_ = r.listener.Close()
+	}
+	if r.shareHost != nil && (next == nil || r.shareHost != next.shareHost) {
+		r.shareHost.close()
+	}
+	if r.shareStore != nil && (next == nil || r.shareStore != next.shareStore) {
+		_ = r.shareStore.Close()
 	}
 	if r.db != nil && (next == nil || r.db != next.db) {
 		_ = r.db.Close()
@@ -122,7 +136,8 @@ func (r *runtime) serve(ctx context.Context, path string, localSetup bool) (*run
 	_ = level.UnmarshalText([]byte(r.cfg.LogLevel))
 	r.output.SetLimits(r.cfg.Logging.MaxSize, r.cfg.Logging.Keep)
 	log := slog.New(slog.NewJSONHandler(r.output, &slog.HandlerOptions{Level: level}))
-	g := gateway.New(context.WithoutCancel(ctx), r.cfg, r.db, log)
+	g := gateway.New(context.WithoutCancel(ctx), r.cfg, r.db, log, r.shares)
+	r.activateShares()
 	g.ConfigureAdmin(r.cfg.Admin, path, r.output.Recent)
 	if localSetup {
 		g.ConfigureLocalSetup(path, r.output.Recent)
@@ -153,6 +168,9 @@ func (r *runtime) serve(ctx context.Context, path string, localSetup bool) (*run
 	errs := make(chan error, 1)
 	go func() { errs <- server.Serve(r.listener) }()
 	log.Info("gateway listening")
+	if r.shares != nil {
+		log.Info("temporary share listening", "listen", r.cfg.TempFiles.Listen, "max_bytes", r.cfg.TempFiles.MaxBytes)
+	}
 	var next *runtime
 	var serveErr error
 	select {

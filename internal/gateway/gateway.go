@@ -21,6 +21,7 @@ import (
 	"hashinex/internal/onebot"
 	"hashinex/internal/qqofficial"
 	"hashinex/internal/store"
+	"hashinex/internal/tempfiles"
 	"hashinex/internal/transport"
 )
 
@@ -96,6 +97,8 @@ type Gateway struct {
 	generation     string
 	limits         config.Limits
 	storage        config.Storage
+	shares         *tempfiles.Service
+	shareTTL       time.Duration
 	store          *store.Store
 	matcher        *matching.Engine
 	matching       config.Matching
@@ -112,24 +115,34 @@ type Gateway struct {
 	eventWork     atomic.Int64
 	mu            sync.Mutex
 	pending       map[string]call
+	shareLookups  map[string]shareLookup
 	prefix        string
 	internalToken string
 	serial        uint64
 	stats         counters
 }
 
-func New(parent context.Context, cfg *config.Config, db *store.Store, log *slog.Logger) *Gateway {
+func New(parent context.Context, cfg *config.Config, db *store.Store, log *slog.Logger, shares ...*tempfiles.Service) *Gateway {
 	ctx, stop := context.WithCancel(parent)
 	var random [32]byte
 	rand.Read(random[:])
 	g := &Gateway{
-		ctx: ctx, stop: stop, log: log, limits: cfg.Limits, storage: cfg.Storage, store: db,
+		ctx: ctx, stop: stop, log: log, limits: cfg.Limits, storage: cfg.Storage, store: db, shareTTL: cfg.TempFiles.TTL,
 		listen: cfg.Listen, generation: time.Now().UTC().Format(time.RFC3339Nano),
 		matching:      cfg.Matching,
 		prefix:        hex.EncodeToString(random[:16]),
 		internalToken: hex.EncodeToString(random[16:]),
 		inputs:        make(map[string]*input), routes: make(map[[2]string]*route),
 		pending: make(map[string]call),
+	}
+	if g.limits.GScoreFrameBytes == 0 {
+		g.limits.GScoreFrameBytes = config.DefaultGScoreFrameBytes
+	}
+	if len(shares) != 0 {
+		g.shares = shares[0]
+		if g.shares != nil {
+			g.shareLookups = make(map[string]shareLookup)
+		}
 	}
 	if cfg.Matching.Mode == "shadow" || cfg.Matching.Mode == "auto" {
 		g.matcher = matching.New(cfg.Matching, db, log)
@@ -297,7 +310,7 @@ func (g *Gateway) runGScore(listen string, routes []*route) {
 	for _, r := range routes {
 		targets = append(targets, gscore.Target{SelfID: r.input.cfg.SelfID, URL: local + r.cfg.From, Token: g.internalToken})
 	}
-	link := gscore.ManagedConnection(output.ID, output.URL, output.Token, targets)
+	link := gscore.ManagedConnection(output.ID, output.URL, output.Token, targets, g.limits.GScoreFrameBytes)
 	gscore.Run(g.ctx, []gscore.Connection{link}, g.log)
 }
 
@@ -356,6 +369,9 @@ func (g *Gateway) fromInput(in *input, peer *transport.Peer, raw []byte) {
 		}
 		status := string(frame.Status)
 		if frame.RetCode != nil && (status == `"ok"` || status == `"failed"` || status == `"async"`) {
+			if g.acceptShareLookup(peer, frame) {
+				return
+			}
 			if in.virtualReplies != nil {
 				select {
 				case in.virtualReplies <- virtualReply{peer: peer, echo: frame.Echo, raw: raw}:

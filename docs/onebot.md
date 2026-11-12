@@ -49,5 +49,6 @@ routes:
 ## AstrBot 与 AiBot
 
 - AstrBot 的 OneBot v11 适配器可同时接入不同 `self_id` 的 Bot，基于原事件的回复按该事件的 `self_id` 选择连接。同一群事件经两个输入交给 AstrBot 时，可能处理两次。定时发送等缺少原事件的动作需要能选定发送 Bot。
+- AstrBot 通过官 Bot 发送本地文件时，给 AstrBot 输出配置「官 Bot 本地文件目录」，并让网关能以相同路径读取文件。启用临时分享后，官 Bot 发送限时链接。 [文件发送配置](qq-official.md#发送普通文件) · [临时分享部署](tempfiles.md)
 - AiBot 的发送器只保留一个 Bot 实例。使用野收官发时，在野生 Bot 路由选择 AiBot 输出，并在该路由配置「群消息发送 Bot」和代发群号。官 Bot 的直连业务路由只勾选需要它直接接收事件的其他输出。AiBot 的 OneBot 输出可使用 `reverse-dial`，地址填写它实际监听的完整反向 WebSocket 地址，例如 `ws://127.0.0.1:8080/onebot/v11/ws`。
 - 野生 Bot 输入的静默群会停止向其所有业务输出投递该群事件。AiBot 要从野生 Bot 收某群的消息时，该群需允许转发。官 Bot 作为指定发送者时可保持入站静默，发送仍受目标群映射、平台权限和群白名单限制。

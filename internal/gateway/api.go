@@ -29,7 +29,8 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 	upstream := r.input
 	if r.input.official == nil {
 		var params actionParams
-		canRedirect := r.groupSender != nil && (frame.Action == "send_group_msg" || frame.Action == "send_msg")
+		canRedirect := r.groupSender != nil && (frame.Action == "send_group_msg" || frame.Action == "send_msg" ||
+			(g.shares != nil && (forwardSend(frame.Action) || frame.Action == "upload_group_file")))
 		if err := json.Unmarshal(frame.Params, &params); err == nil {
 			group := onebot.ID(params.GroupID)
 			silent := group != "" && r.input.cfg.Silent(group, "")

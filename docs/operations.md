@@ -13,9 +13,12 @@ config/
 data/
   hashinex.sqlite
   hashinex.jsonl
+  tempfiles/
 ```
 
 默认配置的位置以可执行文件为准，启动时可用 `-config` 指定其他 YAML。相对数据库和日志路径以 YAML 所在目录为准。默认数据目录在启动时自动创建。WebUI 保存密钥后生成 `config.yaml.secrets.json`，YAML 中保存密钥引用。配置、身份数据库、日志及其备份都应保留在运行目录或独立存储。
+
+`data/tempfiles/` 在启用临时分享后创建。公网代理指向分享服务的独立端口。 [临时分享部署](tempfiles.md)
 
 ## 首次启动
 
@@ -62,6 +65,8 @@ test -f config/config.yaml || cp config.example.yaml config/config.yaml
 | WebUI 拒绝保存 | 根据保存按钮附近的中文提示，检查点名的字段及实例。YAML 格式错误会给出可用的行号。 |
 | 匹配没有进展 | 核对观察端的同文消息、时钟、群映射、头像和冻结状态。 |
 | 官 Bot 代发失败 | 检查来源输入的静默群、路由的代发群号、官 Bot 主动发送权限及群白名单。在「身份映射」确认真实群号已关联到该官 Bot 的群 OpenID。 |
+| 官 Bot 未生成分享链接 | 检查「临时分享」已启用并重启生效、总容量足够、目标群由官 Bot 发送。日志 `temporary share listening` 表示分享端口已启动。 [临时分享部署](tempfiles.md) |
+| 多图或合并消息超过 WebSocket 上限 | 内置 gscore 使用 `limits.gscore_frame_bytes`，其他连接使用 `limits.frame_bytes`。在「系统设置 → 队列与超时」调整后重启。 |
 | AiBot 回复走错 Bot | AiBot 的发送器只保存一个 Bot 实例。野收官发时让 AiBot 只连接来源输入，并在该路由选择发送 Bot。 [OneBot 路由配置](onebot.md#astrbot-与-aibot) |
 | 回复返回 1404 | 根据具体错误检查动作支持、发送 Bot 的目标映射、消息上下文和引用索引。 |
 | 回复返回 1409 | 提供明确的消息上下文，或缩小触发业务回复的事件范围。 |

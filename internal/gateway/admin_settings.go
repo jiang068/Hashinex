@@ -12,7 +12,7 @@ import (
 	"hashinex/internal/config"
 )
 
-var settingKeys = []string{"listen", "public_ws_url", "log_level", "inputs", "outputs", "routes", "storage", "matching", "limits", "logging", "admin"}
+var settingKeys = []string{"listen", "public_ws_url", "log_level", "inputs", "outputs", "routes", "storage", "matching", "limits", "logging", "admin", "tempfiles"}
 
 func readSettings(raw []byte, path string) (map[string]any, error) {
 	cfg, err := config.ParseAt(raw, path)

@@ -136,7 +136,12 @@ func (g *Gateway) runOutput(r *route, conn *websocket.Conn) {
 		_ = conn.Close(websocket.StatusPolicyViolation, "output already connected or stopping")
 		return
 	}
-	peer := transport.NewPeer(g.ctx, conn, g.limits, log)
+	limits := g.limits
+	if r.output.Protocol == config.GScore {
+		// The authenticated local adapter can receive frames up to this size from gscore.
+		limits.FrameBytes = limits.GScoreFrameBytes
+	}
+	peer := transport.NewPeer(g.ctx, conn, limits, log)
 	connected := time.Now()
 	lifecycle, _ := json.Marshal(map[string]any{
 		"time": connected.Unix(), "self_id": json.Number(r.input.cfg.SelfID),

@@ -87,8 +87,9 @@ func (in Input) Silent(group, native string) bool {
 }
 
 type Output struct {
-	Endpoint `yaml:",inline"`
-	Protocol string `yaml:"protocol"`
+	Endpoint         `yaml:",inline"`
+	Protocol         string `yaml:"protocol"`
+	OfficialFileRoot string `yaml:"official_file_root,omitempty"`
 }
 
 type Route struct {
@@ -113,32 +114,39 @@ func (r Route) Targets() []string {
 	return r.Outputs
 }
 
+const (
+	DefaultGScoreFrameBytes = 16 << 20
+	maxFrameBytes           = 64 << 20
+)
+
 type Limits struct {
-	FrameBytes      int64         `yaml:"frame_bytes"`
-	EventQueue      int           `yaml:"event_queue"`
-	APIQueue        int           `yaml:"api_queue"`
-	PendingPerPeer  int           `yaml:"pending_per_peer"`
-	PendingPerInput int           `yaml:"pending_per_input"`
-	WriteTimeout    time.Duration `yaml:"write_timeout"`
-	APITimeout      time.Duration `yaml:"api_timeout"`
-	EventTTL        time.Duration `yaml:"event_ttl"`
-	DedupTTL        time.Duration `yaml:"dedup_ttl"`
-	DedupSize       int           `yaml:"dedup_size"`
-	PingInterval    time.Duration `yaml:"ping_interval"`
+	FrameBytes       int64         `yaml:"frame_bytes"`
+	GScoreFrameBytes int64         `yaml:"gscore_frame_bytes"`
+	EventQueue       int           `yaml:"event_queue"`
+	APIQueue         int           `yaml:"api_queue"`
+	PendingPerPeer   int           `yaml:"pending_per_peer"`
+	PendingPerInput  int           `yaml:"pending_per_input"`
+	WriteTimeout     time.Duration `yaml:"write_timeout"`
+	APITimeout       time.Duration `yaml:"api_timeout"`
+	EventTTL         time.Duration `yaml:"event_ttl"`
+	DedupTTL         time.Duration `yaml:"dedup_ttl"`
+	DedupSize        int           `yaml:"dedup_size"`
+	PingInterval     time.Duration `yaml:"ping_interval"`
 }
 
 type Config struct {
-	Listen   string   `yaml:"listen"`
-	PublicWS string   `yaml:"public_ws_url,omitempty"`
-	LogLevel string   `yaml:"log_level"`
-	Inputs   []Input  `yaml:"inputs"`
-	Outputs  []Output `yaml:"outputs"`
-	Routes   []Route  `yaml:"routes"`
-	Limits   Limits   `yaml:"limits"`
-	Storage  Storage  `yaml:"storage"`
-	Matching Matching `yaml:"matching"`
-	Admin    Admin    `yaml:"admin"`
-	Logging  Logging  `yaml:"logging"`
+	Listen    string    `yaml:"listen"`
+	PublicWS  string    `yaml:"public_ws_url,omitempty"`
+	LogLevel  string    `yaml:"log_level"`
+	Inputs    []Input   `yaml:"inputs"`
+	Outputs   []Output  `yaml:"outputs"`
+	Routes    []Route   `yaml:"routes"`
+	Limits    Limits    `yaml:"limits"`
+	Storage   Storage   `yaml:"storage"`
+	Matching  Matching  `yaml:"matching"`
+	Admin     Admin     `yaml:"admin"`
+	Logging   Logging   `yaml:"logging"`
+	TempFiles TempFiles `yaml:"tempfiles"`
 }
 
 type Admin struct {
@@ -225,6 +233,9 @@ func resolve(cfg *Config, path string, overrides map[string]string) (*Config, er
 	if cfg.Logging.File != "" && !filepath.IsAbs(cfg.Logging.File) {
 		cfg.Logging.File = filepath.Join(filepath.Dir(path), cfg.Logging.File)
 	}
+	if cfg.TempFiles.Enabled && !filepath.IsAbs(cfg.TempFiles.Directory) {
+		cfg.TempFiles.Directory = filepath.Join(filepath.Dir(path), cfg.TempFiles.Directory)
+	}
 	return cfg, nil
 }
 
@@ -238,12 +249,13 @@ func Parse(raw []byte) (*Config, error) {
 func ParseAt(raw []byte, path string) (*Config, error) {
 	cfg := Config{
 		Listen: "127.0.0.1:6700", LogLevel: "info",
-		Storage: Storage{MessageTTL: 24 * time.Hour, ReplyWindow: 30 * time.Second},
-		Logging: Logging{MaxSize: 10 << 20, Keep: 3},
+		Storage:   Storage{MessageTTL: 24 * time.Hour, ReplyWindow: 30 * time.Second},
+		Logging:   Logging{MaxSize: 10 << 20, Keep: 3},
+		TempFiles: TempFiles{Listen: "127.0.0.1:6701", Directory: "tempfiles", TTL: 10 * time.Minute, MaxBytes: 512 << 20},
 		Matching: Matching{Mode: "off", PairWindow: 2 * time.Second, EventTTL: 5 * time.Second,
 			EvidenceTTL: 24 * time.Hour, Successes: 3, GroupSuccesses: 3, GroupSenders: 2, Distance: 4},
 		Limits: Limits{
-			FrameBytes: 1 << 20, EventQueue: 128, APIQueue: 32,
+			FrameBytes: 1 << 20, GScoreFrameBytes: DefaultGScoreFrameBytes, EventQueue: 128, APIQueue: 32,
 			PendingPerPeer: 32, PendingPerInput: 128,
 			WriteTimeout: 5 * time.Second, APITimeout: 12 * time.Second,
 			EventTTL: 15 * time.Second, DedupTTL: time.Minute, DedupSize: 4096,
@@ -253,6 +265,7 @@ func ParseAt(raw []byte, path string) (*Config, error) {
 	if portableGatewayConfig(path) {
 		cfg.Storage.SQLite = "../data/hashinex.sqlite"
 		cfg.Logging.File = "../data/hashinex.jsonl"
+		cfg.TempFiles.Directory = "../data/tempfiles"
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	decoder.KnownFields(true)
@@ -276,6 +289,9 @@ func (cfg *Config) validate(secrets map[string]string) error {
 	}
 	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 		return fmt.Errorf("「网关服务 → 监听地址」（listen）的端口须为 1 到 65535 的整数。")
+	}
+	if err := cfg.TempFiles.validate(port); err != nil {
+		return err
 	}
 	switch cfg.LogLevel {
 	case "debug", "info", "warn", "error":
@@ -308,7 +324,8 @@ func (cfg *Config) validate(secrets map[string]string) error {
 		field           string
 		value, min, max int64
 	}{
-		{"frame_bytes", limits.FrameBytes, 1024, 16 << 20},
+		{"frame_bytes", limits.FrameBytes, 1024, maxFrameBytes},
+		{"gscore_frame_bytes", limits.GScoreFrameBytes, 1024, maxFrameBytes},
 		{"event_queue", int64(limits.EventQueue), 1, 65536},
 		{"api_queue", int64(limits.APIQueue), 1, 65536},
 		{"dedup_size", int64(limits.DedupSize), 1, 1 << 20},
@@ -448,6 +465,9 @@ func (cfg *Config) validate(secrets map[string]string) error {
 		}
 		if _, exists := outputs[output.ID]; exists {
 			return fmt.Errorf("输出 %q 的名称（id）重复。请给两个输出使用不同的名称，并更新相关路由。", output.ID)
+		}
+		if output.OfficialFileRoot != "" && !filepath.IsAbs(output.OfficialFileRoot) {
+			return fmt.Errorf("输出 %q 的「官 Bot 本地文件目录」（official_file_root）须填写网关进程能读取的绝对路径。", output.ID)
 		}
 		switch output.Protocol {
 		case OneBot11:

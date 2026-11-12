@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"hashinex/internal/config"
 	"hashinex/internal/onebot"
 	"hashinex/internal/store"
 	"hashinex/internal/transport"
@@ -101,6 +102,14 @@ func (g *Gateway) performVirtual(job virtualJob) {
 		return
 	}
 	switch job.frame.Action {
+	case "get_forward_msg":
+		if job.call.route.output.Protocol != config.GScore {
+			g.reject(job.key, 1404, "no identity conversion rule for this OneBot action")
+			return
+		}
+		// gscore uses the opaque forward ID and extracts display content without member IDs.
+		g.sendUpstream(job.key, job.call, job.raw)
+		return
 	case "send_msg", "send_group_msg", "send_private_msg", "delete_msg", "get_msg",
 		"get_login_info", "get_status", "get_version_info", "get_group_info", "get_group_list",
 		"get_group_member_info", "get_group_member_list", "get_stranger_info", "get_friend_list",

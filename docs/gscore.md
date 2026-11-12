@@ -37,3 +37,5 @@ connections:
 适配器使用 `bot_id=onebot` 上报消息，gscore 可继续用已映射的真实 QQ 号查询 OneBot 历史绑定。`bot_self_id` 使用当前 Bot 的 `self_id`。回复使用原消息的 `msg_id`，在同一条 Bot 会话提交 OneBot API 请求，实际发送权限与被动回复有效期由 Hashinex 和 QQ 校验。需要接收图片回复时，按 Base64 负载配置网关的 `limits.frame_bytes`。
 
 入站支持群聊和私聊的常见消息段。官方 Bot 回程支持文本、图片、@ 和平台允许的引用。两只官方 Bot 若都配置相同测试群的业务路由，gscore 会分别收到两条事件。
+
+NapCat 的 OneBot 引用消息在身份转换和原样透传路由中都可解析。启用路由的「允许下游 API 回程」后，适配器通过来源 Bot 查询被引用的消息，向 gscore 上报引用正文、图片和可读取的合并转发内容。原消息查不到时，当前指令和引用 ID 仍会送达。

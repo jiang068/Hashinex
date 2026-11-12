@@ -20,6 +20,7 @@ type Connection struct {
 	CoreToken    string `yaml:"gscore_token_env"`
 	onebotSecret string
 	targets      []Target
+	frameBytes   int64
 }
 
 type Target struct {
@@ -107,7 +108,7 @@ func websocketURL(address string) (*url.URL, error) {
 	return u, nil
 }
 
-func ManagedConnection(name, coreURL, coreToken string, targets []Target) Connection {
+func ManagedConnection(name, coreURL, coreToken string, targets []Target, frameBytes int64) Connection {
 	if coreToken != "" {
 		u, _ := websocketURL(coreURL)
 		query := u.Query()
@@ -115,5 +116,5 @@ func ManagedConnection(name, coreURL, coreToken string, targets []Target) Connec
 		u.RawQuery = query.Encode()
 		coreURL = u.String()
 	}
-	return Connection{Name: name, CoreURL: coreURL, targets: targets}
+	return Connection{Name: name, CoreURL: coreURL, targets: targets, frameBytes: frameBytes}
 }

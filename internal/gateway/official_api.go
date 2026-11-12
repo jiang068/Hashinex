@@ -50,7 +50,7 @@ func (g *Gateway) performOfficial(job officialJob) {
 		case errors.As(err, &api) && api.Code == qqofficial.MissingAppPermission:
 			response = onebot.Failure(job.call.echo, 1403, "QQ app lacks permission for this profile API (11253)")
 		case errors.As(err, &api):
-			response = onebot.Failure(job.call.echo, 1502, api.Error())
+			response = onebot.Failure(job.call.echo, 1502, err.Error())
 		case errors.Is(err, context.DeadlineExceeded):
 			response = onebot.Failure(job.call.echo, 1504, "official action timed out; result unknown")
 		default:
@@ -74,6 +74,7 @@ type actionParams struct {
 	GroupID    json.RawMessage `json:"group_id"`
 	UserID     json.RawMessage `json:"user_id"`
 	Message    json.RawMessage `json:"message"`
+	Messages   json.RawMessage `json:"messages"`
 	MessageID  json.RawMessage `json:"message_id"`
 	AutoEscape bool            `json:"auto_escape"`
 	NoCache    bool            `json:"no_cache"`
@@ -98,7 +99,20 @@ func (g *Gateway) invokeOfficial(ctx context.Context, c call, frame onebot.Frame
 		return map[string]bool{"online": in.online.Load(), "good": in.online.Load()}, nil
 	case "get_version_info":
 		return map[string]string{"app_name": "Hashinex", "protocol_version": "v11"}, nil
-	case "send_msg", "send_group_msg", "send_private_msg":
+	case "send_msg", "send_group_msg", "send_private_msg", "send_group_forward_msg", "send_private_forward_msg", "send_forward_msg":
+		return g.sendOfficial(ctx, c, frame.Action, p)
+	case "upload_group_file", "upload_private_file":
+		if g.shares == nil {
+			return nil, actionError{1404, "官 Bot 的 OneBot 文件上传需要在 WebUI 的「系统设置 → 临时分享」启用分享服务。"}
+		}
+		var file struct {
+			File string `json:"file"`
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(frame.Params, &file) != nil {
+			return nil, actionError{1400, "OneBot 文件上传参数格式无效。"}
+		}
+		p.Message, _ = json.Marshal([]segment{{Type: "file", Data: map[string]string{"file": file.File, "name": file.Name}}})
 		return g.sendOfficial(ctx, c, frame.Action, p)
 	case "get_msg", "delete_msg":
 		id := numericID(p.MessageID)
@@ -151,9 +165,9 @@ func (g *Gateway) invokeOfficial(ctx context.Context, c call, frame onebot.Frame
 
 func (p actionParams) sendKind(action string) string {
 	switch action {
-	case "send_group_msg":
+	case "send_group_msg", "send_group_forward_msg", "upload_group_file":
 		return "group"
-	case "send_private_msg":
+	case "send_private_msg", "send_private_forward_msg", "upload_private_file":
 		return "private"
 	}
 	if p.Type != "" {
@@ -219,9 +233,25 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		(kind == "private" && !filterAllows(c.route.cfg.Users, target)) {
 		return nil, actionError{1403, "target is outside the route scope"}
 	}
-	segments, err := parseMessage(p.Message, p.AutoEscape)
-	if err != nil {
-		return nil, err
+	shareRaw := p.Message
+	var segments []segment
+	useShare := forwardSend(action)
+	if useShare {
+		if g.shares == nil {
+			return nil, actionError{1404, "官 Bot 合并转发需要在 WebUI 的「系统设置 → 临时分享」启用分享服务。"}
+		}
+		if len(p.Messages) != 0 {
+			shareRaw = p.Messages
+		}
+	} else {
+		segments, err = parseMessage(p.Message, p.AutoEscape)
+		if err != nil {
+			return nil, err
+		}
+		useShare = g.shares != nil && shareRequired(segments)
+	}
+	if useShare {
+		segments = slices.DeleteFunc(segments, func(part segment) bool { return part.Type != "reply" })
 	}
 	if redirected {
 		// The OneBot source's message handles are not valid QQ reply credentials.
@@ -231,6 +261,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	var text strings.Builder
 	var quoteID int64
 	var image string
+	var file map[string]string
 	for _, seg := range segments {
 		switch seg.Type {
 		case "text":
@@ -254,8 +285,8 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 				return nil, actionError{1400, "invalid quote ID"}
 			}
 		case "image":
-			if image != "" {
-				return nil, actionError{1400, "one QQ image per action is supported"}
+			if image != "" || file != nil {
+				return nil, actionError{1400, "one QQ attachment per action is supported"}
 			}
 			image = seg.Data["file"]
 			if image == "" {
@@ -264,13 +295,18 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 			if image == "" {
 				return nil, actionError{1400, "image source missing"}
 			}
+		case "file":
+			if image != "" || file != nil {
+				return nil, actionError{1400, "one QQ attachment per action is supported"}
+			}
+			file = seg.Data
 		default:
 			return nil, actionError{1404, "message segment unsupported by this QQ adapter"}
 		}
 	}
 	messageText := text.String()
 	hasText := strings.TrimSpace(messageText) != ""
-	if !hasText && image == "" {
+	if !hasText && image == "" && file == nil && !useShare {
 		return nil, actionError{1400, "message content is empty"}
 	}
 	refID := numericID(p.MessageID)
@@ -341,6 +377,28 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		body["msg_type"] = 7
 		body["media"] = map[string]string{"file_info": fileInfo}
 	}
+	if file != nil {
+		fileInfo, err := c.uploadOfficialFile(ctx, kind, peer, file)
+		if err != nil {
+			var prepare *qqofficial.FileUploadPrepareError
+			if errors.As(err, &prepare) {
+				g.log.WarnContext(ctx, "QQ file upload prepare failed",
+					"input", c.input.cfg.ID, "output", c.route.output.ID, "action", action, "chat_kind", kind,
+					"file_size_bytes", prepare.FileSize, "http_status", prepare.Status, "qq_code", prepare.Code,
+					"qq_message", prepare.QQMessage, "qq_trace_id", prepare.TraceID)
+			}
+			return nil, err
+		}
+		body["msg_type"] = 7
+		body["media"] = map[string]string{"file_info": fileInfo}
+	}
+	if useShare {
+		content, err := g.publishOfficialShare(ctx, c, kind, peer, targetID, shareRaw, p.AutoEscape)
+		if err != nil {
+			return nil, err
+		}
+		body["content"] = content
+	}
 	var sent struct {
 		ID string `json:"id"`
 	}
@@ -359,8 +417,8 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		}
 		return json.Marshal(data)
 	}
-	if strings.HasPrefix(image, "base64://") {
-		// The sent handle remains usable for recall without persisting the full upload.
+	if useShare || file != nil || strings.HasPrefix(image, "base64://") {
+		// Preserve the sent handle without storing a private path, URL, or file contents.
 		snapshot = nil
 	}
 	msg, _, err := g.store.CreateMessage(ctx, store.Message{
@@ -479,36 +537,10 @@ func parseMessage(raw json.RawMessage, literal bool) ([]segment, error) {
 	return out, nil
 }
 
-var (
-	cqTextDecoder  = strings.NewReplacer("&#91;", "[", "&#93;", "]", "&amp;", "&")
-	cqParamDecoder = strings.NewReplacer("&#91;", "[", "&#93;", "]", "&#44;", ",", "&amp;", "&")
-)
-
 func parseCQ(text string) ([]segment, error) {
-	var out []segment
-	for text != "" {
-		prefix, rest, has := strings.Cut(text, "[CQ:")
-		if prefix != "" {
-			out = append(out, makeSegment("text", "text", cqTextDecoder.Replace(prefix)))
-		}
-		if !has {
-			break
-		}
-		cq, after, closed := strings.Cut(rest, "]")
-		if !closed || len(out) > 126 {
-			return nil, actionError{1400, "invalid or oversized CQ message"}
-		}
-		parts := strings.Split(cq, ",")
-		s := segment{Type: parts[0], Data: make(map[string]string)}
-		for _, part := range parts[1:] {
-			key, value, ok := strings.Cut(part, "=")
-			if !ok || key == "" {
-				return nil, actionError{1400, "invalid CQ segment"}
-			}
-			s.Data[key] = cqParamDecoder.Replace(value)
-		}
-		out = append(out, s)
-		text = after
+	segments, err := onebot.ParseCQ(text)
+	if err != nil {
+		return nil, actionError{1400, err.Error()}
 	}
-	return out, nil
+	return segments, nil
 }

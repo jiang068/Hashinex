@@ -8,6 +8,19 @@ storage:
 logging:
   file: "../data/hashinex.jsonl"
 
+limits:
+  frame_bytes: 1048576
+  gscore_frame_bytes: 16777216
+
+# 临时分享仅在启用后启动独立 HTTP 监听。
+tempfiles:
+  enabled: false
+  listen: "127.0.0.1:6701"
+  public_url: ""
+  directory: "../data/tempfiles"
+  max_bytes: 536870912
+  ttl: 10m
+
 inputs: []
 outputs: []
 routes: []

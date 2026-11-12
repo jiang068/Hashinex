@@ -25,7 +25,7 @@ inputs:
 
 ## API
 
-支持 `send_msg`、`send_group_msg`、`send_private_msg`、`get_msg`、`delete_msg`、`get_login_info`、`get_status`、`get_version_info`、`get_group_info`、`get_group_member_info` 和 `get_group_member_list`。发送支持文本、已知成员 @、引用，以及每次一个 HTTPS 或 Base64 图片。入站图片仅接受事件中的 HTTPS 地址。使用 Base64 时还需按负载调高 OneBot `limits.frame_bytes`。
+支持 `send_msg`、`send_group_msg`、`send_private_msg`、`get_msg`、`delete_msg`、`get_login_info`、`get_status`、`get_version_info`、`get_group_info`、`get_group_member_info` 和 `get_group_member_list`。发送支持文本、已知成员 @、引用，以及每次一个图片或普通文件。图片支持 HTTPS 和 Base64，使用 Base64 时还需按负载调高 OneBot `limits.frame_bytes`。入站图片仅接受事件中的 HTTPS 地址。
 
 群成员查询优先走 QQ 官方接口。查询 Bot 自身使用群内状态接口，并返回配置中的 `self_id`。群与成员 ID 按当前映射转换，结果受输入和路由范围限制。
 
@@ -34,5 +34,13 @@ inputs:
 - 发送参数可以带 `message_id` 作为被动回复上下文。OneBot `reply` 消息段需要原事件提供引用索引。网关分别处理被动发送凭据和引用索引。
 - `implicit_reply: unique-recent` 仅在该连接同一会话有唯一近期消息时推断被动回复上下文。出现多条候选时返回 `1409`，需提供明确的消息 ID。
 - 主动发送默认关闭。权限确认后可设置 `allow_proactive: true`。平台错误或超时会返回失败。发送超时后先确认消息是否已经送达。
+
+### 发送普通文件
+
+AstrBot 等 OneBot 下游可在发送动作中提供 `file` 消息段。文件为本地绝对路径或 `file://` URI 时，在 WebUI 的「输出管理」编辑该下游，填写「官 Bot 本地文件目录」（`official_file_root`）。如果两个服务运行在不同容器，把文件目录挂载到网关中，并确保下游发来的绝对路径在网关里也能打开。网关只读取此共享目录内的普通文件。
+
+启用临时分享时，官 Bot 会发送文件分享链接，本地文件复制到临时目录并随链接过期清理。 [临时分享部署](tempfiles.md)
+
+关闭临时分享时，官 Bot 通过 QQ 富媒体接口发送文件。下游可提供 QQ 能直接下载的 HTTP(S) 文件地址。本地文件在 5 MB 以内整文件上传，较大的文件按 QQ 返回的计划分片上传，上限为 200 MB。上传超时时，在「系统设置 → 队列与超时」核对 `limits.api_timeout` 和下游的 API 等待时间。 [QQ 富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html)
 
 群用户和私聊用户分别使用 `qq:AppID` 和 `qq:AppID:c2c` 识别来源。WebUI 按真实 QQ 号和群号归并所有来源，可以展开查看、调整和添加关联。AppSecret 可直接在输入表单中设置。 [官方凭证](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/access-token.html) · [官方消息收发](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)

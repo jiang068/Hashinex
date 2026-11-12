@@ -2,6 +2,7 @@ package qqofficial
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,12 +59,25 @@ func NewClient(appID, secret, origin string, timeout time.Duration) *Client {
 }
 
 type APIError struct {
-	Status int
-	Code   int64
+	Status  int
+	Code    int64
+	TraceID string
+	message string
 }
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("QQ API error (HTTP %d, code %d)", e.Status, e.Code)
+}
+
+var qqTraceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+func redactQQMessage(message string, values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[redacted]")
+		}
+	}
+	return message
 }
 
 func (c *Client) AccessToken(ctx context.Context) (string, error) {
@@ -151,11 +166,25 @@ func (c *Client) request(ctx context.Context, base, method, path, token string, 
 		return errors.New("QQ API response unreadable or too large")
 	}
 	var meta struct {
-		Code int64 `json:"code"`
+		Code    int64  `json:"code"`
+		ErrCode int64  `json:"err_code"`
+		Message string `json:"message"`
+		TraceID string `json:"trace_id"`
 	}
 	_ = json.Unmarshal(raw, &meta)
-	if res.StatusCode < 200 || res.StatusCode >= 300 || meta.Code != 0 {
-		return &APIError{Status: res.StatusCode, Code: meta.Code}
+	code := cmp.Or(meta.Code, meta.ErrCode)
+	if res.StatusCode < 200 || res.StatusCode >= 300 || code != 0 {
+		traceID := res.Header.Get("X-Tps-Trace-ID")
+		if !qqTraceIDPattern.MatchString(traceID) {
+			traceID = meta.TraceID
+			if !qqTraceIDPattern.MatchString(traceID) {
+				traceID = ""
+			}
+		}
+		return &APIError{
+			Status: res.StatusCode, Code: code, TraceID: traceID,
+			message: redactQQMessage(meta.Message, token, c.secret, c.appID),
+		}
 	}
 	if dest != nil {
 		if err := json.Unmarshal(raw, dest); err != nil {
@@ -192,10 +221,14 @@ func (c *Client) UploadImage(ctx context.Context, kind, peer, image string) (str
 		}
 		body["url"] = image
 	}
+	return c.uploadMedia(ctx, ConversationPath(kind, peer), body)
+}
+
+func (c *Client) uploadMedia(ctx context.Context, path string, body map[string]any) (string, error) {
 	var uploaded struct {
 		FileInfo string `json:"file_info"`
 	}
-	err := c.Do(ctx, http.MethodPost, ConversationPath(kind, peer)+"/files", body, &uploaded)
+	err := c.Do(ctx, http.MethodPost, path+"/files", body, &uploaded)
 	if err != nil {
 		return "", err
 	}

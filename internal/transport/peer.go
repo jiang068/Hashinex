@@ -84,7 +84,15 @@ func (p *Peer) Run(onFrame func([]byte), onUndelivered func(int)) {
 		for p.ctx.Err() == nil {
 			kind, raw, err := p.conn.Read(p.ctx)
 			if err != nil {
-				p.Stop(errors.New("websocket read ended"))
+				switch {
+				case errors.Is(err, websocket.ErrMessageTooBig):
+					p.log.Warn("websocket message too large", "read_limit_bytes", p.limits.FrameBytes)
+					p.Stop(websocket.ErrMessageTooBig)
+				case websocket.CloseStatus(err) == websocket.StatusMessageTooBig:
+					p.Stop(errors.New("websocket peer rejected an oversized message"))
+				default:
+					p.Stop(errors.New("websocket read ended"))
+				}
 				return
 			}
 			if kind != websocket.MessageText {

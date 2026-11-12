@@ -31,10 +31,12 @@ func (s *Store) CreateMessage(ctx context.Context, msg Message, build func(int64
 		return Message{}, false, err
 	}
 	defer tx.Rollback()
+	var packet []byte
 	err = tx.QueryRowContext(ctx, `SELECT id, packet FROM message_refs
 		WHERE namespace=? AND chat_kind=? AND peer=? AND native_id=? AND incoming=?`,
-		msg.Namespace, msg.ChatKind, msg.Peer, msg.NativeID, msg.Incoming).Scan(&msg.ID, &msg.Packet)
+		msg.Namespace, msg.ChatKind, msg.Peer, msg.NativeID, msg.Incoming).Scan(&msg.ID, &packet)
 	if err == nil {
+		msg.Packet = packet
 		return msg, false, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -64,15 +66,17 @@ func (s *Store) CreateMessage(ctx context.Context, msg Message, build func(int64
 
 func (s *Store) Message(ctx context.Context, namespace string, id int64, now time.Time) (Message, error) {
 	msg := Message{ID: id, Namespace: namespace}
+	var packet []byte
 	var received, expires int64
 	err := s.db.QueryRowContext(ctx, `SELECT chat_kind, peer, user_native, native_id, event_id, reference_id,
 		incoming, packet, received_at, expires_at FROM message_refs
 		WHERE namespace=? AND id=? AND expires_at>?`, namespace, id, now.UnixMilli()).
 		Scan(&msg.ChatKind, &msg.Peer, &msg.UserNative, &msg.NativeID, &msg.EventID, &msg.ReferenceID,
-			&msg.Incoming, &msg.Packet, &received, &expires)
+			&msg.Incoming, &packet, &received, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrMessageNotFound
 	}
+	msg.Packet = packet
 	msg.ReceivedAt, msg.ExpiresAt = time.UnixMilli(received), time.UnixMilli(expires)
 	return msg, err
 }

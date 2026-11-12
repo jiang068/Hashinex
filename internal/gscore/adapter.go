@@ -1,8 +1,10 @@
 package gscore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,11 +14,11 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"hashinex/internal/config"
 	"hashinex/internal/onebot"
 )
 
 const (
-	maxFrameBytes = 16 << 20
 	maxPending    = 32
 	actionTimeout = 25 * time.Second
 )
@@ -58,7 +60,7 @@ func reconnect(ctx context.Context, link Connection, log *slog.Logger) {
 	}
 }
 
-func dial(ctx context.Context, address, token string) (*websocket.Conn, error) {
+func dial(ctx context.Context, address, token string, frameBytes int64) (*websocket.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	opts := &websocket.DialOptions{HTTPClient: dialClient, HTTPHeader: make(http.Header)}
@@ -72,7 +74,7 @@ func dial(ctx context.Context, address, token string) (*websocket.Conn, error) {
 		}
 		return nil, fmt.Errorf("WebSocket transport unavailable")
 	}
-	conn.SetReadLimit(maxFrameBytes)
+	conn.SetReadLimit(frameBytes)
 	return conn, nil
 }
 
@@ -89,7 +91,8 @@ type pendingAction struct {
 }
 
 func session(parent context.Context, link Connection, log *slog.Logger) string {
-	core, err := dial(parent, link.CoreURL, "")
+	frameBytes := cmp.Or(link.frameBytes, config.DefaultGScoreFrameBytes)
+	core, err := dial(parent, link.CoreURL, "", frameBytes)
 	if err != nil {
 		return "gscore: " + err.Error()
 	}
@@ -97,14 +100,14 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 	targets := link.oneBotTargets()
 	bots := make(map[string]*websocket.Conn, len(targets))
 	for _, target := range targets {
-		bot, err := dial(parent, target.URL, target.Token)
+		bot, err := dial(parent, target.URL, target.Token, frameBytes)
 		if err != nil {
 			return "OneBot: " + err.Error()
 		}
 		defer bot.CloseNow()
 		bots[target.SelfID] = bot
 	}
-	log.Info("OneBot and gscore connected", "inputs", len(bots))
+	log.Info("OneBot and gscore connected", "inputs", len(bots), "frame_bytes", frameBytes)
 	ctx, cancel := context.WithCancel(parent)
 	var readers sync.WaitGroup
 	defer func() { cancel(); readers.Wait() }()
@@ -130,6 +133,23 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 	}
 	var serial uint64
 	pending := make(map[string]pendingAction)
+	quotes := make(map[string]*quoteLookup)
+	sendEvent := func(event coreEvent) error {
+		if err := write(ctx, core, websocket.MessageBinary, event); err != nil {
+			return err
+		}
+		log.Info("OneBot event delivered to gscore")
+		return nil
+	}
+	requestQuote := func(quote *quoteLookup, action obAction) error {
+		serial++
+		action.Echo = strconv.FormatUint(serial, 10)
+		if err := write(ctx, bots[quote.event.SelfID], websocket.MessageText, action); err != nil {
+			return err
+		}
+		quotes[action.Echo] = quote
+		return nil
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -146,9 +166,24 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 					}
 				}
 			}
+			for echo, quote := range quotes {
+				if !now.Before(quote.deadline) {
+					delete(quotes, echo)
+					log.Debug("OneBot quote lookup timed out")
+					if err := sendEvent(quote.finish()); err != nil {
+						return "gscore event send failed"
+					}
+				}
+			}
 		case frame := <-frames:
 			if frame.err != nil {
 				if frame.selfID == "" {
+					if errors.Is(frame.err, websocket.ErrMessageTooBig) {
+						return fmt.Sprintf("gscore WebSocket message exceeded the %d byte limit", frameBytes)
+					}
+					if websocket.CloseStatus(frame.err) == websocket.StatusMessageTooBig {
+						return "gscore rejected an oversized WebSocket message"
+					}
 					return "gscore connection closed"
 				}
 				return "OneBot connection closed"
@@ -188,7 +223,20 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 				}
 				serial++
 				action.Echo = strconv.FormatUint(serial, 10)
-				if err := write(ctx, bot, websocket.MessageText, action); err != nil {
+				body, err := json.Marshal(action)
+				if err != nil || int64(len(body)) > frameBytes {
+					if err != nil {
+						log.Warn("could not encode gscore OneBot action", "action", action.Name)
+					} else {
+						log.Warn("gscore OneBot action exceeds frame limit", "action", action.Name,
+							"bytes", len(body), "limit_bytes", frameBytes)
+					}
+					if err := receipt(ctx, core, reply, nil); err != nil {
+						return "gscore receipt failed"
+					}
+					continue
+				}
+				if err := writeFrame(ctx, bot, websocket.MessageText, body); err != nil {
 					return "OneBot action send failed"
 				}
 				reply.Content = nil
@@ -202,6 +250,27 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 			}
 			if message.RetCode != nil {
 				echo := jsonString(message.Echo)
+				if quote := quotes[echo]; quote != nil && quote.event.SelfID == frame.selfID {
+					delete(quotes, echo)
+					if time.Now().Before(quote.deadline) {
+						if *message.RetCode == 0 {
+							quote.accept(message.Data)
+						} else {
+							log.Debug("OneBot quote lookup failed", "retcode", *message.RetCode)
+							quote.accept(nil)
+						}
+						if action, ok := quote.nextForward(); ok {
+							if err := requestQuote(quote, action); err != nil {
+								return "OneBot quote action send failed"
+							}
+							continue
+						}
+					}
+					if err := sendEvent(quote.finish()); err != nil {
+						return "gscore event send failed"
+					}
+					continue
+				}
 				action, ok := pending[echo]
 				if !ok || action.selfID != frame.selfID {
 					continue
@@ -233,10 +302,17 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 				continue
 			}
 			if event, ok := incoming(message, frame.raw, frame.selfID); ok {
-				if err := write(ctx, core, websocket.MessageBinary, event); err != nil {
+				if id := quotedID(event.Content); id != "" && len(quotes) < maxQuotePending && len(frame.raw) <= maxQuoteBytes {
+					quote := &quoteLookup{event: event, id: id, deadline: time.Now().Add(quoteTimeout), forwardIndex: -1}
+					action := obAction{Name: "get_msg", Params: map[string]any{"message_id": json.Number(id)}}
+					if err := requestQuote(quote, action); err != nil {
+						return "OneBot quote action send failed"
+					}
+					continue
+				}
+				if err := sendEvent(event); err != nil {
 					return "gscore event send failed"
 				}
-				log.Info("OneBot event delivered to gscore")
 			}
 		}
 	}
@@ -263,6 +339,10 @@ func write(ctx context.Context, conn *websocket.Conn, kind websocket.MessageType
 	if err != nil {
 		return err
 	}
+	return writeFrame(ctx, conn, kind, body)
+}
+
+func writeFrame(ctx context.Context, conn *websocket.Conn, kind websocket.MessageType, body []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return conn.Write(ctx, kind, body)

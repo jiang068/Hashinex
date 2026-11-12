@@ -45,6 +45,8 @@ credentials.local.*
 /design.md
 /tmp/
 /temp/
+/tempfiles/
+hashinex-shares/
 /.testdata-tmp/
 /go.work
 /go.work.sum

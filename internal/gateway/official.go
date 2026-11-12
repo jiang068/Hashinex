@@ -131,10 +131,7 @@ func (g *Gateway) ingestOfficial(in *input, d qqofficial.Dispatch) bool {
 	}
 }
 
-type segment struct {
-	Type string            `json:"type"`
-	Data map[string]string `json:"data"`
-}
+type segment = onebot.Segment
 
 func makeSegment(kind, key, value string) segment {
 	return segment{Type: kind, Data: map[string]string{key: value}}

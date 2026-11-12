@@ -80,6 +80,7 @@ export const collections = {
       ["ws_mode", "连接方式", only(choices(...outputModes.map(key => [key, modes[key]])), draft => !core(draft))],
       ["url", "目标 WebSocket 地址", only({ ...required, wide: true, placeholder: "ws://127.0.0.1:8765/ws/hashinex", hint: "多只 Bot 共用 gscore 时，在各自路由里选择同一个输出。" }, draft => dials(draft) || core(draft))],
       ["listen_path", "监听路径", only({ ...listener, placeholder: "/astrbot/{input}", hint: "留空使用默认路径。多个来源共用时，使用 {input} 区分。" }, draft => !core(draft) && !dials(draft))],
+      ["official_file_root", "官 Bot 本地文件目录", only({ wide: true, hint: "填写此下游与网关共享的文件目录绝对路径。用于官 Bot 发送下游提供的本地文件。" }, draft => !core(draft))],
       ["token_value", "连接令牌", password]
     ],
     clean(draft) {
@@ -88,6 +89,7 @@ export const collections = {
         if (/[{}]/.test(item.url)) throw new Error("每个 gscore 输出填写一个完整地址。");
         delete item.ws_mode;
         delete item.listen_path;
+        delete item.official_file_root;
       } else if (dials(item)) delete item.listen_path;
       else delete item.url;
       return item;
@@ -153,6 +155,17 @@ export const systemSettings = {
     label: "身份数据库", note: "SQLite、消息保留时间、隐式回复窗口",
     fields: [["sqlite", "SQLite 文件", { wide: true }], ["message_ttl", "消息保留时间", required], ["reply_window", "隐式回复窗口", required]]
   },
+  tempfiles: {
+    label: "临时分享", note: "官 Bot 通过独立端口分享文件、合并消息和多图",
+    fields: [
+      ["enabled", "启用临时分享", flag],
+      ["listen", "监听地址", { wide: true, placeholder: "127.0.0.1:6701", hint: "使用与 WebUI 不同的端口。内网穿透或反向代理指向此地址。" }],
+      ["public_url", "公网地址", { wide: true, placeholder: "https://share.example.com/share", hint: "官 Bot 发给用户的地址。路径留空时使用 /share。" }],
+      ["directory", "文件目录", { wide: true, placeholder: "../data/tempfiles", hint: "相对路径以网关配置文件所在目录为起点。" }],
+      ["max_bytes", "总容量（字节）", { ...number, hint: "所有未过期分享共用此容量。512 MiB 填 536870912。" }],
+      ["ttl", "有效期", { placeholder: "10m" }]
+    ]
+  },
   matching: {
     label: "静默匹配", note: "匹配模式、证据阈值、头像相似度",
     fields: [
@@ -171,7 +184,8 @@ export const systemSettings = {
   limits: {
     label: "队列与超时", note: "WebSocket、事件队列、API 回程和去重",
     fields: [
-      ["frame_bytes", "单帧字节上限", number],
+      ["frame_bytes", "常规连接单帧上限（字节）", { ...number, hint: "适用于 AstrBot、NapCat 等外部连接。64 MiB 填 67108864。" }],
+      ["gscore_frame_bytes", "内置 gscore 单帧上限（字节）", { ...number, hint: "用于 gscore 直连和网关内部转接。默认 16777216（16 MiB），32 MiB 填 33554432。" }],
       ["event_queue", "事件队列长度", number],
       ["api_queue", "API 队列长度", number],
       ["pending_per_peer", "单个对端的待处理 API 数", number],

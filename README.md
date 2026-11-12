@@ -23,6 +23,8 @@ Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 On
 
 使用野生 Bot 收消息时，可在路由里指定官 Bot 为部分群或全部群发送消息。名单外的群继续由来源 Bot 回复。 [配置步骤](docs/onebot.md#野生-bot-收消息官-bot-发群消息) · [AstrBot 与 AiBot 接入差异](docs/onebot.md#astrbot-与-aibot)
 
+官 Bot 可以用限时链接分享文件、多图和合并转发消息。分享服务使用独立 HTTP 端口，默认有效期为 10 分钟。NapCat 消息经 gscore 处理时，可读取引用正文和图片。 [临时分享配置](docs/tempfiles.md) · [gscore 引用适配](docs/gscore.md)
+
 ## 身份映射与私聊
 
 - WebUI 以真实 QQ 号或真实群号聚合映射，展开后可查看各 Bot 的 OpenID。身份列表支持按来源群、QQ 号和 OpenID 检索，可选每页 10、20、50、100 或 200 条。
@@ -31,7 +33,7 @@ Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 On
 
 ## 配置、数据与迁移
 
-`config/` 保存网关配置和密钥，`data/` 保存 SQLite 和日志，两者默认位于可执行文件旁。迁移时先停止网关，再复制这两个目录到目标运行目录。运行配置、数据及其备份应留在源码仓库外。 [目录结构与迁移步骤](docs/operations.md)
+`config/` 保存网关配置和密钥，`data/` 保存 SQLite、日志和启用分享后生成的临时文件，两者默认位于可执行文件旁。迁移时先停止网关，再复制这两个目录到目标运行目录。运行配置、数据及其备份应留在源码仓库外。 [目录结构与迁移步骤](docs/operations.md)
 
 ## 源码目录
 
@@ -42,12 +44,14 @@ Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 On
 | `internal/gateway/` | 连接、路由、身份转换和内嵌 WebUI |
 | `internal/qqofficial/`、`internal/onebot/`、`internal/gscore/` | 协议接入和消息格式 |
 | `internal/config/`、`internal/matching/`、`internal/store/` | 配置、静默匹配和 SQLite 存储 |
+| `internal/tempfiles/` | 临时分享页面、附件存储与过期清理 |
 
 ## 文档
 
 - [QQ 官方 Bot 接入](docs/qq-official.md)
 - [OneBot v11 接入](docs/onebot.md)
 - [gscore 直连与独立适配器](docs/gscore.md)
+- [官 Bot 临时分享与公网部署](docs/tempfiles.md)
 - [静默匹配与头像验证](docs/matching.md)
 - [Windows 和 Linux 编译指南](docs/build.md)
 - [部署、升级与故障排查](docs/operations.md)
@@ -62,7 +66,7 @@ Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 On
 | [BotShepherd](https://github.com/Loping151/BotShepherd) | OneBot 多连接管理、事件分发和 `echo` 回程关联。 |
 | [Gensokyo-NewQQ](https://github.com/Te-River/Gensokyo-NewQQ) | 用 AppID 与 OpenID 构造 QQ 官方头像地址，以及群消息的被动回复上下文。 |
 | WuwaIdMigration | 用消息时间、文本和头像指纹配对用户的思路。 |
-| [napcat-plugin-gscore-adapter](https://github.com/xiowo/napcat-plugin-gscore-adapter) | OneBot 事件和消息段转换成 gscore 格式，以及 gscore 回复转回 OneBot 发送动作。 |
+| [napcat-plugin-gscore-adapter](https://github.com/xiowo/napcat-plugin-gscore-adapter) | OneBot 与 gscore 的消息转换、引用上下文查询及合并转发节点解析。 |
 | [gsuid_core（gscore）](https://github.com/Genshin-bots/gsuid_core) | 直连 WebSocket 的消息结构、回复关联，以及沿用 OneBot 平台标识与真实 QQ 号查询历史绑定。 |
 
 ## 许可证
