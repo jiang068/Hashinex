@@ -92,7 +92,7 @@
 ## 十、技术要求
 
 - **已完成的技术要求**包括 Go、HTTP/WebSocket、SQLite WAL、YAML、结构化日志、独立二进制、配置持久化与模块化结构。Windows amd64 本地编译并运行过。
-- **待验收的平台场景**是 Linux amd64、Linux arm64 的真实环境启动与端到端联调。跨平台编译矩阵已配置。
+- **待验收的平台场景**是 Linux amd64、Linux arm64 的真实环境启动与端到端联调。
 
 ## 十一、开发阶段与稳定性验收
 
@@ -110,7 +110,7 @@
 
 - [x] Go 源码、可运行程序、内嵌 WebUI、样例 YAML 和版本化数据库迁移。
 - [x] README、部署迁移与日志故障排查、官方 QQ Bot、NapCat/SnowLuma、gscore 和静默匹配说明。
-- [x] 仓库内自动化用例和 Linux amd64/arm64、Windows amd64 编译工作流。
+- [x] 仓库内自动化用例。
 - [ ] Linux 运行验收和完整稳定性矩阵。发布包按当前迭代要求暂缓。
 
 ## 十三、开发原则和第三方声明
