@@ -15,10 +15,12 @@
 ## 支持的消息
 
 - AstrBot 的 OneBot `file` 段及 `upload_group_file`、`upload_private_file` 动作。
-- OneBot 或 gscore 同一条消息里的两张及以上图片，连同消息里的文字一起展示。单图配文字由官 Bot 直接发送。使用 gscore 的单图模式时，gscore 会拆成独立消息。在「系统设置 → 队列与超时」可调整内置 gscore 单帧上限（`limits.gscore_frame_bytes`），默认 16 MiB。AstrBot 等外部连接使用 `limits.frame_bytes`。保存后重启网关。
+- OneBot 或 gscore 同一条消息里的两张及以上图片，连同消息里的文字一起展示。使用 gscore 的单图模式时，gscore 会拆成独立消息。在「系统设置 → 队列与超时」可调整内置 gscore 单帧上限（`limits.gscore_frame_bytes`），默认 16 MiB。AstrBot 等外部连接使用 `limits.frame_bytes`。保存后重启网关。
 - 合并转发的 OneBot `node` 内容和 gscore 的 `node` 内容。仅带原消息 ID 的节点需要能在当前会话读到对应原消息。
 
 本地和 Base64 图片写入临时目录。网络附件由访客浏览器使用原地址访问，受原地址的可用性影响。
+
+纯图、单图配文字和纯文字优先由官 Bot 作为一条消息直接发送。媒体上传失败或 QQ 明确拒绝直发消息时，例如返回 `40034006`，网关会把原消息转成临时分享，发出默认标题「查看临时消息」、有效期和链接。原文及附件在分享页中展示。常规分享遇到 `40034006` 时，可复用原链接以默认标题重试一次。
 
 ## 分享访问
 

@@ -23,7 +23,7 @@ Hashinex 是一个独立运行的 QQ Bot 网关。它接收 QQ 官方 Bot 和 On
 
 使用野生 Bot 收消息时，可在路由里指定官 Bot 为部分群或全部群发送消息。名单外的群继续由来源 Bot 回复。 [配置步骤](docs/onebot.md#野生-bot-收消息官-bot-发群消息) · [AstrBot 与 AiBot 接入差异](docs/onebot.md#astrbot-与-aibot)
 
-官 Bot 可以用限时链接分享文件、多图和合并转发消息。分享服务使用独立 HTTP 端口，默认有效期为 10 分钟。NapCat 消息经 gscore 处理时，可读取引用正文和图片。 [临时分享配置](docs/tempfiles.md) · [gscore 引用适配](docs/gscore.md)
+官 Bot 可以用限时链接分享文件、多图和合并转发消息。媒体上传失败或直发消息被 QQ 拒绝时，网关会尝试发送带默认标题的分享链接。分享服务使用独立 HTTP 端口，默认有效期为 10 分钟。NapCat 消息经 gscore 处理时，可读取引用正文和图片。 [临时分享配置](docs/tempfiles.md) · [gscore 引用适配](docs/gscore.md)
 
 ## 身份映射与私聊
 

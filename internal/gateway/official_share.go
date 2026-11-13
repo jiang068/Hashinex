@@ -29,7 +29,7 @@ func shareRequired(segments []segment) bool {
 	images := 0
 	for _, part := range segments {
 		switch part.Type {
-		case "file", "node", "nodes", "forward", "forward_msg":
+		case "file", "record", "video", "node", "nodes", "forward", "forward_msg":
 			return true
 		case "image":
 			images++
@@ -48,6 +48,15 @@ func shareDuration(ttl time.Duration) string {
 	return strconv.FormatInt(int64(ttl/time.Second), 10) + " 秒"
 }
 
+type officialShare struct {
+	title   string
+	address string
+}
+
+func (s officialShare) content(ttl time.Duration) string {
+	return cmp.Or(s.title, "查看临时消息") + "（有效期 " + shareDuration(ttl) + "）\n" + s.address
+}
+
 type shareBuilder struct {
 	g      *Gateway
 	call   call
@@ -59,7 +68,7 @@ type shareBuilder struct {
 	files  []*localOfficialFile
 }
 
-func (g *Gateway) publishOfficialShare(ctx context.Context, c call, kind, peer string, target int64, raw json.RawMessage, literal bool) (string, error) {
+func (g *Gateway) publishOfficialShare(ctx context.Context, c call, kind, peer string, target int64, raw json.RawMessage, literal bool) (officialShare, error) {
 	b := shareBuilder{g: g, call: c, kind: kind, peer: peer, target: target}
 	defer func() {
 		for _, file := range b.files {
@@ -67,23 +76,23 @@ func (g *Gateway) publishOfficialShare(ctx context.Context, c call, kind, peer s
 		}
 	}()
 	if err := b.appendMessage(ctx, raw, 0, literal); err != nil {
-		return "", err
+		return officialShare{}, err
 	}
 	address, err := g.shares.Publish(ctx, b.parts)
 	if err != nil {
 		switch {
 		case errors.Is(err, tempfiles.ErrCapacity):
-			return "", actionError{1503, "临时分享目录容量不足。请等待旧链接过期，或在「临时分享」调高总容量。"}
+			return officialShare{}, actionError{1503, "临时分享目录容量不足。请等待旧链接过期，或在「临时分享」调高总容量。"}
 		case errors.Is(err, tempfiles.ErrAsset):
-			return "", actionError{1400, "临时分享内容为空、过大或包含无效的本地媒体。请检查文件和图片格式。"}
+			return officialShare{}, actionError{1400, "临时分享内容为空、过大或包含无效的本地媒体。请检查文件和图片格式。"}
 		case ctx.Err() != nil:
-			return "", ctx.Err()
+			return officialShare{}, ctx.Err()
 		default:
 			g.log.Warn("temporary share storage failed", "input", c.input.cfg.ID, "output", c.route.output.ID)
-			return "", actionError{1502, "临时分享写入失败。请检查分享目录权限和磁盘空间。"}
+			return officialShare{}, actionError{1502, "临时分享写入失败。请检查分享目录权限和磁盘空间。"}
 		}
 	}
-	return b.linkTitle() + "（有效期 " + shareDuration(g.shareTTL) + "）\n" + address, nil
+	return officialShare{title: b.linkTitle(), address: address}, nil
 }
 
 func (b *shareBuilder) linkTitle() string {
@@ -96,7 +105,7 @@ func (b *shareBuilder) linkTitle() string {
 			}
 		}
 	}
-	title = strings.Join(strings.Fields(cmp.Or(title, "查看临时消息")), " ")
+	title = strings.Join(strings.Fields(title), " ")
 	const maxTitleRunes = 120
 	count := 0
 	for i := range title {

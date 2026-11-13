@@ -65,6 +65,8 @@ type APIError struct {
 	message string
 }
 
+const MessageContentRejected = 40034006
+
 func (e *APIError) Error() string {
 	return fmt.Sprintf("QQ API error (HTTP %d, code %d)", e.Status, e.Code)
 }

@@ -50,6 +50,9 @@ func (g *Gateway) performOfficial(job officialJob) {
 		case errors.As(err, &api) && api.Code == qqofficial.MissingAppPermission:
 			response = onebot.Failure(job.call.echo, 1403, "QQ app lacks permission for this profile API (11253)")
 		case errors.As(err, &api):
+			g.log.WarnContext(ctx, "QQ official API action failed",
+				"input", job.call.input.cfg.ID, "action", job.frame.Action,
+				"http_status", api.Status, "qq_code", api.Code, "qq_trace_id", api.TraceID)
 			response = onebot.Failure(job.call.echo, 1502, err.Error())
 		case errors.Is(err, context.DeadlineExceeded):
 			response = onebot.Failure(job.call.echo, 1504, "official action timed out; result unknown")
@@ -366,20 +369,31 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	} else if !c.input.cfg.AllowProactive {
 		return nil, actionError{1404, "no incoming QQ reply context; proactive sends disabled"}
 	}
-	if image != "" {
-		fileInfo, err := c.input.official.UploadImage(ctx, kind, peer, image)
-		if errors.Is(err, qqofficial.ErrInvalidImage) {
-			return nil, actionError{1400, err.Error()}
-		}
+	var share officialShare
+	if useShare {
+		share, err = g.publishOfficialShare(ctx, c, kind, peer, targetID, shareRaw, p.AutoEscape)
 		if err != nil {
 			return nil, err
 		}
-		body["msg_type"] = 7
-		body["media"] = map[string]string{"file_info": fileInfo}
-	}
-	if file != nil {
-		fileInfo, err := c.uploadOfficialFile(ctx, kind, peer, file)
-		if err != nil {
+		body["content"] = share.content(g.shareTTL)
+	} else if image != "" || file != nil {
+		var fileInfo string
+		if image != "" {
+			fileInfo, err = c.input.official.UploadImage(ctx, kind, peer, image)
+		} else {
+			fileInfo, err = c.uploadOfficialFile(ctx, kind, peer, file)
+		}
+		if err == nil {
+			body["msg_type"] = 7
+			body["media"] = map[string]string{"file_info": fileInfo}
+		} else if g.shares != nil && ctx.Err() == nil {
+			share, err = g.officialShareFallback(ctx, c, action, kind, peer, targetID, shareRaw, p.AutoEscape, "media_upload", err)
+			if err != nil {
+				return nil, err
+			}
+			body["content"] = share.content(g.shareTTL)
+			delete(body, "message_reference")
+		} else {
 			var prepare *qqofficial.FileUploadPrepareError
 			if errors.As(err, &prepare) {
 				g.log.WarnContext(ctx, "QQ file upload prepare failed",
@@ -387,23 +401,41 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 					"file_size_bytes", prepare.FileSize, "http_status", prepare.Status, "qq_code", prepare.Code,
 					"qq_message", prepare.QQMessage, "qq_trace_id", prepare.TraceID)
 			}
+			if errors.Is(err, qqofficial.ErrInvalidImage) {
+				return nil, actionError{1400, err.Error()}
+			}
 			return nil, err
 		}
-		body["msg_type"] = 7
-		body["media"] = map[string]string{"file_info": fileInfo}
-	}
-	if useShare {
-		content, err := g.publishOfficialShare(ctx, c, kind, peer, targetID, shareRaw, p.AutoEscape)
-		if err != nil {
-			return nil, err
-		}
-		body["content"] = content
 	}
 	var sent struct {
 		ID string `json:"id"`
 	}
-	if err := c.input.official.Do(ctx, http.MethodPost, path, body, &sent); err != nil {
-		return nil, err
+	sendErr := c.input.official.Do(ctx, http.MethodPost, path, body, &sent)
+	var api *qqofficial.APIError
+	// A transport or server error can leave the delivery status unknown.
+	if g.shares != nil && ctx.Err() == nil && errors.As(sendErr, &api) && api.Status < http.StatusInternalServerError {
+		switch {
+		case share.address == "":
+			share, err = g.officialShareFallback(ctx, c, action, kind, peer, targetID, shareRaw, p.AutoEscape, "message_send", sendErr)
+			if err != nil {
+				return nil, err
+			}
+		case share.title != "" && api.Code == qqofficial.MessageContentRejected:
+			share.title = ""
+			g.log.WarnContext(ctx, "QQ rejected titled share, retrying with default title",
+				"input", c.input.cfg.ID, "output", c.route.output.ID, "action", action,
+				"http_status", api.Status, "qq_code", api.Code, "qq_trace_id", api.TraceID)
+		default:
+			return nil, sendErr
+		}
+		body["content"] = share.content(g.shareTTL)
+		body["msg_type"] = 0
+		delete(body, "media")
+		delete(body, "message_reference")
+		sendErr = c.input.official.Do(ctx, http.MethodPost, path, body, &sent)
+	}
+	if sendErr != nil {
+		return nil, sendErr
 	}
 	if sent.ID == "" {
 		return nil, errors.New("QQ accepted send but omitted its message ID")
@@ -417,7 +449,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		}
 		return json.Marshal(data)
 	}
-	if useShare || file != nil || strings.HasPrefix(image, "base64://") {
+	if share.address != "" || file != nil || strings.HasPrefix(image, "base64://") {
 		// Preserve the sent handle without storing a private path, URL, or file contents.
 		snapshot = nil
 	}
@@ -429,6 +461,25 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		return nil, fmt.Errorf("QQ accepted send but storing its message handle failed: %w", err)
 	}
 	return map[string]int64{"message_id": msg.ID}, nil
+}
+
+func (g *Gateway) officialShareFallback(ctx context.Context, c call, action, kind, peer string, target int64, raw json.RawMessage, literal bool, phase string, cause error) (officialShare, error) {
+	share, err := g.publishOfficialShare(ctx, c, kind, peer, target, raw, literal)
+	fields := []any{"input", c.input.cfg.ID, "output", c.route.output.ID, "action", action, "phase", phase}
+	var api *qqofficial.APIError
+	if errors.As(cause, &api) {
+		fields = append(fields, "http_status", api.Status, "qq_code", api.Code, "qq_trace_id", api.TraceID)
+	} else {
+		fields = append(fields, "failure_type", fmt.Sprintf("%T", cause))
+	}
+	if err != nil {
+		fields = append(fields, "fallback_error_type", fmt.Sprintf("%T", err))
+		g.log.WarnContext(ctx, "official temporary-share fallback could not be prepared", fields...)
+		return officialShare{}, err
+	}
+	g.log.WarnContext(ctx, "official send failed, retrying with temporary share", fields...)
+	share.title = ""
+	return share, nil
 }
 
 func (in *input) officialBusinessGroup(id int64) bool {
