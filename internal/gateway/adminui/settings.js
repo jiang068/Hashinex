@@ -212,7 +212,7 @@ export const systemSettings = {
     ]
   },
   logging: {
-    label: "文件日志", note: "日志文件、大小和轮转保留",
-    fields: [["file", "文件路径", { wide: true }], ["max_size_bytes", "轮转文件大小（字节）", number], ["keep", "保留文件数", number]]
+    label: "文件日志", note: "每天一个日志文件，保留天数等于保留的文件数，包含当天。",
+    fields: [["file", "文件基础路径", { wide: true }], ["keep", "保留天数", number]]
   }
 };

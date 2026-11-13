@@ -2,40 +2,59 @@ package logging
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"hashinex/internal/config"
 )
 
+const logDate = "2006-01-02"
+
+type record struct {
+	data     []byte
+	queuedAt time.Time
+}
+
 type Output struct {
-	mu       sync.Mutex
-	console  io.Writer
-	cfg      config.Logging
-	file     *os.File
-	size     int64
-	recent   [256][]byte
-	position int
-	queue    chan []byte
-	stop     chan struct{}
-	done     chan struct{}
-	dropped  atomic.Uint64
-	closed   atomic.Bool
+	mu         sync.Mutex
+	console    io.Writer
+	dir        string
+	prefix     string
+	ext        string
+	file       *os.File
+	day        string
+	recent     [256][]byte
+	position   int
+	queue      chan record
+	stop       chan struct{}
+	done       chan struct{}
+	dropped    atomic.Uint64
+	closed     bool
+	keep       atomic.Int64
+	keepChange chan struct{}
+	prunedKeep int
 }
 
 func Open(console io.Writer, cfg config.Logging) (*Output, error) {
-	o := &Output{console: console, cfg: cfg, queue: make(chan []byte, 512),
-		stop: make(chan struct{}), done: make(chan struct{})}
+	o := &Output{console: console, queue: make(chan record, 512),
+		stop: make(chan struct{}), done: make(chan struct{}), keepChange: make(chan struct{}, 1)}
+	o.keep.Store(int64(cfg.Keep))
 	if cfg.File != "" {
-		if err := os.MkdirAll(filepath.Dir(cfg.File), 0700); err != nil {
+		o.dir = filepath.Dir(cfg.File)
+		name := filepath.Base(cfg.File)
+		o.ext = filepath.Ext(name)
+		o.prefix = strings.TrimSuffix(name, o.ext) + "-"
+		if err := os.MkdirAll(o.dir, 0700); err != nil {
 			return nil, err
 		}
-		if err := o.openFile(); err != nil {
+		if err := o.openDay(time.Now().Format(logDate)); err != nil {
 			return nil, err
 		}
 	}
@@ -43,26 +62,26 @@ func Open(console io.Writer, cfg config.Logging) (*Output, error) {
 	return o, nil
 }
 
-func (o *Output) openFile() error {
-	file, err := os.OpenFile(o.cfg.File, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+func (o *Output) openDay(day string) error {
+	file, err := os.OpenFile(filepath.Join(o.dir, o.prefix+day+o.ext), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return err
+	if o.file != nil {
+		_ = o.file.Close()
 	}
-	o.file, o.size = file, info.Size()
+	o.file, o.day, o.prunedKeep = file, day, 0
 	return nil
 }
 
 func (o *Output) Write(p []byte) (int, error) {
-	if o.closed.Load() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
 		return len(p), nil
 	}
 	select {
-	case o.queue <- bytes.Clone(p):
+	case o.queue <- record{data: bytes.Clone(p), queuedAt: time.Now()}:
 	default:
 		o.dropped.Add(1)
 	}
@@ -75,6 +94,8 @@ func (o *Output) run() {
 		select {
 		case record := <-o.queue:
 			o.write(record)
+		case <-o.keepChange:
+			o.applyKeep()
 		case <-o.stop:
 			for {
 				select {
@@ -88,52 +109,80 @@ func (o *Output) run() {
 	}
 }
 
-func (o *Output) write(p []byte) {
+func (o *Output) write(entry record) {
 	if dropped := o.dropped.Swap(0); dropped != 0 {
 		_, _ = fmt.Fprintln(o.console, "Hashinex log queue overflow; records dropped:", dropped)
 	}
+	p := entry.data
 	o.mu.Lock()
 	o.recent[o.position] = bytes.TrimSpace(p)
 	o.position = (o.position + 1) % len(o.recent)
-	maxSize, keep := o.cfg.MaxSize, o.cfg.Keep
 	o.mu.Unlock()
 	_, _ = o.console.Write(p)
 	if o.file == nil {
 		return
 	}
-	if o.size > 0 && o.size+int64(len(p)) > maxSize {
-		if err := o.rotate(keep); err != nil {
-			_, _ = fmt.Fprintln(o.console, "Hashinex file log rotation failed:", err)
+	if day := entry.queuedAt.Format(logDate); day != o.day {
+		if err := o.openDay(day); err != nil {
+			_, _ = fmt.Fprintln(o.console, "Hashinex daily log open failed:", err)
 			return
 		}
 	}
-	written, err := o.file.Write(p)
-	o.size += int64(written)
-	if err != nil {
+	if _, err := o.file.Write(p); err != nil {
 		_, _ = fmt.Fprintln(o.console, "Hashinex file log write failed:", err)
 	}
+	o.applyKeep()
 }
 
-func (o *Output) rotate(keep int) error {
-	o.file.Close()
-	o.file = nil
-	for i := keep - 1; i >= 0; i-- {
-		source := o.cfg.File
-		if i != 0 {
-			source += "." + strconv.Itoa(i)
+func (o *Output) applyKeep() {
+	keep := int(o.keep.Load())
+	if o.file == nil || keep < 1 || keep == o.prunedKeep {
+		return
+	}
+	o.prunedKeep = keep
+	if err := o.prune(keep); err != nil {
+		_, _ = fmt.Fprintln(o.console, "Hashinex daily log cleanup failed:", err)
+	}
+}
+
+func (o *Output) prune(keep int) error {
+	files, err := os.ReadDir(o.dir)
+	if err != nil {
+		return err
+	}
+	// ReadDir sorts by name, so the YYYY-MM-DD suffix orders daily files by date.
+	// Reserve one slot for the open file even if the system clock moved backwards.
+	remaining := keep - 1
+	for i := len(files) - 1; i >= 0; i-- {
+		file := files[i]
+		if !file.Type().IsRegular() {
+			continue
 		}
-		target := o.cfg.File + "." + strconv.Itoa(i+1)
-		if err := os.Rename(source, target); err != nil && !os.IsNotExist(err) {
-			return err
+		suffix, matchesPrefix := strings.CutPrefix(file.Name(), o.prefix)
+		day, matchesExt := strings.CutSuffix(suffix, o.ext)
+		if !matchesPrefix || !matchesExt || len(day) != len(logDate) || day == o.day {
+			continue
+		}
+		if _, parseErr := time.Parse(logDate, day); parseErr != nil {
+			continue
+		}
+		if remaining > 0 {
+			remaining--
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(o.dir, file.Name())); removeErr != nil && !os.IsNotExist(removeErr) {
+			err = errors.Join(err, removeErr)
 		}
 	}
-	return o.openFile()
+	return err
 }
 
-func (o *Output) SetLimits(maxSize int64, keep int) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.cfg.MaxSize, o.cfg.Keep = maxSize, keep
+func (o *Output) SetKeep(keep int) {
+	o.keep.Store(int64(keep))
+	select {
+	case o.keepChange <- struct{}{}:
+	default:
+	}
 }
 
 func (o *Output) Recent() []string {
@@ -149,10 +198,14 @@ func (o *Output) Recent() []string {
 }
 
 func (o *Output) Close() error {
-	if !o.closed.CompareAndSwap(false, true) {
+	o.mu.Lock()
+	if o.closed {
+		o.mu.Unlock()
 		return nil
 	}
+	o.closed = true
 	close(o.stop)
+	o.mu.Unlock()
 	<-o.done
 	if o.file != nil {
 		err := o.file.Close()

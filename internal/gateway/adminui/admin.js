@@ -339,32 +339,40 @@ async function renderIdentities() {
   const result = await (await request("api/identities?" + query)).json();
   if (requestID !== identityRequest) return;
   table("identity-list", ["QQ 号 / 群号", "类型", "来源群", "关联身份", "操作"], result.rows.map(row => {
-    const aliases = row.aliases.map(alias => element("div", "identity-alias",
-      element("div", "", aliasName(alias.namespace), element("small", "log-details mono", alias.native),
-        element("small", "log-details", alias.virtual_id ? alias.namespace + " · 虚拟 ID " + alias.virtual_id : alias.namespace)),
-      button(row.bound ? "调整绑定" : "绑定", () => openBinding(alias))));
+    const aliases = row.aliases.map(alias => {
+      const account = element("div", "", aliasName(alias.namespace), element("small", "log-details mono", alias.native),
+        element("small", "log-details", alias.virtual_id ? alias.namespace + " · 虚拟 ID " + alias.virtual_id : alias.namespace));
+      const identity = alias.avatar_url && alias.avatar_url !== row.avatar_url
+        ? element("div", "avatar-identity", userAvatar(alias.avatar_url, "官方用户头像"), account)
+        : account;
+      return element("div", "identity-alias", identity, button(row.bound ? "调整绑定" : "绑定", () => openBinding(alias)));
+    });
     const details = element("details", "identity-details",
       element("summary", "", row.aliases.length + " 个关联身份"), ...aliases);
     details.open = !row.bound || result.rows.length === 1;
     const sources = row.kind === "group"
       ? row.aliases.map(alias => ({ native: alias.native, real_id: row.bound ? row.id : 0 }))
       : row.aliases.flatMap(alias => alias.sources || []);
-    return [element("div", "", code(row.id), row.bound ? null : element("small", "log-details", "未绑定 · 虚拟 ID")),
+    const id = element("div", "", code(row.id), row.bound ? null : element("small", "log-details", "未绑定 · 虚拟 ID"));
+    const identity = row.kind === "user"
+      ? element("div", "avatar-identity", userAvatar(row.avatar_url, row.bound ? "QQ 用户头像" : "未绑定用户头像"), id)
+      : id;
+    return [identity,
       kind(row.kind), sourceGroups(sources), details, row.bound ? button("添加关联", () => openBinding({ kind: row.kind, real_id: row.id })) : "—"];
   }), "没有找到符合条件的映射。");
   pager("identity-pager", identityPage, result, renderIdentities);
 }
 
-function candidateAvatar(address, label) {
+function userAvatar(address, label) {
   const placeholder = () => {
-    const node = element("span", "candidate-avatar candidate-avatar-placeholder", "—");
+    const node = element("span", "user-avatar user-avatar-placeholder", "—");
     node.setAttribute("role", "img");
     node.setAttribute("aria-label", label + "不可用");
     node.title = label + "不可用";
     return node;
   };
   if (!address) return placeholder();
-  const image = element("img", "candidate-avatar");
+  const image = element("img", "user-avatar");
   image.alt = label;
   image.loading = "lazy";
   image.decoding = "async";
@@ -391,8 +399,8 @@ function renderCandidates(rows) {
       progress.setAttribute("aria-label", label);
       const status = row.frozen ? badge("冲突冻结", "red") : row.bound ? badge("已绑定", "green") : badge("待确认", "amber");
       const original = element("div", "", row.kind === "user" ? "官方用户" : kind(row.kind), element("small", "log-details mono", row.native));
-      const source = row.kind === "user" ? element("div", "candidate-identity", candidateAvatar(row.official_avatar_url, "官方用户头像"), original) : original;
-      const candidate = row.kind === "user" ? element("div", "candidate-identity", candidateAvatar(row.qq_avatar_url, "候选 QQ 头像"), code(row.real_id)) : code(row.real_id);
+      const source = row.kind === "user" ? element("div", "avatar-identity", userAvatar(row.official_avatar_url, "官方用户头像"), original) : original;
+      const candidate = row.kind === "user" ? element("div", "avatar-identity", userAvatar(row.qq_avatar_url, "候选 QQ 头像"), code(row.real_id)) : code(row.real_id);
       return [code(row.namespace), source, candidate,
         sourceGroups(row.kind === "group" ? [{ real_id: row.real_id, native: row.native }] : row.sources || []),
         element("div", "progress", label, progress), row.distance ?? "—", status,
@@ -577,29 +585,25 @@ function renderSettings() {
 }
 
 function renderRestart() {
+  const apply = get("apply-config");
   const restart = get("restart");
   const pending = restarting || live.restarting;
-  restart.hidden = !live.restart_available;
-  restart.disabled = busy || pending || Boolean(restartAddress);
-  restart.textContent = pending ? "正在应用…" : "应用配置";
-  const reconnect = get("reconnect");
   const banner = get("restart-note");
   banner.toggleAttribute("data-error", Boolean(live.restart_error));
   if (live.restart_error) {
     restartAddress = null;
-    restart.disabled = busy || pending;
     banner.textContent = live.restart_error;
   } else if (restartAddress) {
     const link = element("a", "", restartAddress.href);
     link.href = restartAddress.href;
     banner.replaceChildren("网关将切换监听地址。请通过新地址打开控制台 ", link);
   } else if (pending) {
-    banner.textContent = "正在应用已保存的配置。";
+    banner.textContent = restarting === "manual" ? "正在重启网关。" : "正在应用已保存的配置。";
   } else {
     banner.textContent = live.restart_needed ? "配置已保存，点击「应用配置」生效。" : "";
   }
-  reconnect.hidden = restart.hidden;
-  reconnect.disabled = restart.disabled;
+  apply.hidden = restart.hidden = !live.restart_available;
+  apply.disabled = restart.disabled = busy || pending || Boolean(restartAddress);
   banner.hidden = !banner.textContent;
 }
 
@@ -882,9 +886,10 @@ async function saveSettings() {
 
 async function restartGateway(force = false) {
   if (busy || live.restarting) return;
-  if (changed.size || yamlDirty) throw new Error("请先保存或撤销未保存的更改，再应用配置。");
-  if (force && !confirm("将短暂断开输入和输出，使用已保存的配置重新连接。继续吗？")) return;
-  restarting = busy = true;
+  if (changed.size || yamlDirty) throw new Error("请先保存或撤销未保存的更改。");
+  if (force && !confirm("确定使用已保存的配置重启网关？输入和输出会短暂断开并重新连接。")) return;
+  restarting = force ? "manual" : "apply";
+  busy = true;
   renderRestart();
   try {
     const response = await request(force ? "api/restart?force=1" : "api/restart", { method: "POST" });
@@ -1088,8 +1093,8 @@ get("edit-matching").addEventListener("click", () => attempt(async () => {
 get("log-filter").addEventListener("input", renderLogs);
 get("log-level").addEventListener("change", renderLogs);
 get("save").addEventListener("click", () => attempt(saveSettings));
-get("restart").addEventListener("click", () => attempt(restartGateway));
-get("reconnect").addEventListener("click", () => attempt(() => restartGateway(true)));
+get("apply-config").addEventListener("click", () => attempt(restartGateway));
+get("restart").addEventListener("click", () => attempt(() => restartGateway(true)));
 get("discard").addEventListener("click", () => attempt(discardSettings));
 get("yaml-panel").addEventListener("toggle", () => {
   const panel = get("yaml-panel");

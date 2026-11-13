@@ -219,7 +219,9 @@ func (g *Gateway) adminIdentities(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		writeJSON(w, result)
+		writeJSON(w, store.Page[adminEntity]{
+			Rows: withIdentityAvatars(result.Rows), Page: result.Page, Size: result.Size, Total: result.Total,
+		})
 		return
 	}
 	if g.store == nil {
@@ -235,7 +237,7 @@ func (g *Gateway) adminIdentities(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "identity query failed", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(w, rows)
+		writeJSON(w, withIdentityAvatars(rows))
 		return
 	}
 	rows, err := g.store.Identities(ctx, r.URL.Query().Get("q"))
@@ -244,6 +246,41 @@ func (g *Gateway) adminIdentities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, rows)
+}
+
+type adminIdentityAlias struct {
+	store.ListedIdentity
+	AvatarURL string `json:"avatar_url,omitempty"`
+}
+
+type adminEntity struct {
+	Kind      string               `json:"kind"`
+	ID        int64                `json:"id"`
+	Bound     bool                 `json:"bound"`
+	AvatarURL string               `json:"avatar_url,omitempty"`
+	Aliases   []adminIdentityAlias `json:"aliases"`
+}
+
+func withIdentityAvatars(rows []store.Entity) []adminEntity {
+	result := make([]adminEntity, 0, len(rows))
+	for _, row := range rows {
+		item := adminEntity{Kind: row.Kind, ID: row.ID, Bound: row.Bound, Aliases: make([]adminIdentityAlias, 0, len(row.Aliases))}
+		if row.Kind == "user" && row.Bound {
+			item.AvatarURL = realUserAvatarURL(row.ID)
+		}
+		for _, alias := range row.Aliases {
+			address := officialUserAvatarURL(alias.Kind, alias.Namespace, alias.Native)
+			item.Aliases = append(item.Aliases, adminIdentityAlias{
+				ListedIdentity: alias,
+				AvatarURL:      address,
+			})
+			if row.Kind == "user" && !row.Bound && item.AvatarURL == "" {
+				item.AvatarURL = address
+			}
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func (g *Gateway) adminCandidates(w http.ResponseWriter, r *http.Request) {
@@ -291,16 +328,28 @@ func withCandidateAvatars(rows []store.Candidate) []adminCandidate {
 	for _, row := range rows {
 		item := adminCandidate{Candidate: row}
 		if row.Kind == "user" {
-			if appID, ok := strings.CutPrefix(row.Namespace, "qq:"); ok && appID != "" && row.Native != "" {
-				item.OfficialAvatarURL = qqofficial.AvatarURL(strings.TrimSuffix(appID, ":c2c"), row.Native)
-			}
-			if row.Real > 0 && row.Real < store.VirtualBase {
-				item.QQAvatarURL = qqofficial.QQAvatarURL(row.Real)
-			}
+			item.OfficialAvatarURL = officialUserAvatarURL(row.Kind, row.Namespace, row.Native)
+			item.QQAvatarURL = realUserAvatarURL(row.Real)
 		}
 		result = append(result, item)
 	}
 	return result
+}
+
+func officialUserAvatarURL(kind, namespace, native string) string {
+	appID, official := strings.CutPrefix(namespace, "qq:")
+	appID = strings.TrimSuffix(appID, ":c2c")
+	if kind == "user" && official && appID != "" && native != "" {
+		return qqofficial.AvatarURL(appID, native)
+	}
+	return ""
+}
+
+func realUserAvatarURL(id int64) string {
+	if id > 0 && id < store.VirtualBase {
+		return qqofficial.QQAvatarURL(id)
+	}
+	return ""
 }
 
 func adminPage(query url.Values) (int, int) {

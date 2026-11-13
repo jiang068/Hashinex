@@ -40,8 +40,12 @@ func (s *Store) AddEvidence(ctx context.Context, ev Evidence, since time.Time, t
 	}
 	defer tx.Rollback()
 
+	// A queued match may reach the database after another request binds the user.
 	row, err := tx.ExecContext(ctx, `INSERT INTO evidence(namespace, kind, native, real_id,
-		official_message, observation, sender, distance, recorded_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		official_message, observation, sender, distance, recorded_at)
+		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
+		WHERE ?2<>'user' OR NOT EXISTS (
+			SELECT 1 FROM identity_links WHERE namespace=?1 AND kind=?2 AND native=?3)
 		ON CONFLICT DO NOTHING`, ev.Namespace, ev.Kind, ev.Native, ev.RealID, ev.OfficialMessage,
 		ev.Observation, ev.Sender, ev.Distance, ev.At.UnixMilli())
 	if err != nil {

@@ -173,8 +173,11 @@ func (g *Gateway) convertOfficial(in *input, e officialEnvelope) {
 			return
 		}
 		if (knownGroup == 0 || in.officialGroupAllowed(knownGroup)) && g.observesGroup(in, knownGroup) {
-			g.offerOfficialMatch(in, e, msg, knownGroup)
-			observed = knownGroup != 0
+			if knownGroup == 0 {
+				g.offerOfficialMatch(in, e, msg, 0, false)
+			} else {
+				observed = true
+			}
 		}
 		if !in.officialGroupAllowed(knownGroup) {
 			return
@@ -188,6 +191,9 @@ func (g *Gateway) convertOfficial(in *input, e officialEnvelope) {
 	if err != nil {
 		g.recordOfficialDrop(in, "resolve user", err)
 		return
+	}
+	if observed {
+		g.offerOfficialMatch(in, e, msg, knownGroup, user.Real != 0)
 	}
 	if msg.Kind == "private" && !in.officialPrivateAllowed(user.Real) {
 		if user.Real == 0 {
@@ -277,14 +283,14 @@ func (g *Gateway) convertOfficial(in *input, e officialEnvelope) {
 	g.routeEvent(in, event{raw: normalized, original: raw, frame: frame, deadline: deadline, ref: &ref})
 }
 
-func (g *Gateway) offerOfficialMatch(in *input, e officialEnvelope, msg qqofficial.Message, group int64) {
+func (g *Gateway) offerOfficialMatch(in *input, e officialEnvelope, msg qqofficial.Message, group int64, userBound bool) {
 	if g.matcher == nil || msg.Kind != "group" || msg.AtBot || len(msg.Attachments) != 0 || msg.ReplyTo != "" ||
 		qqofficial.MentionPattern.MatchString(msg.Text) {
 		return
 	}
 	g.matcher.Offer(matching.Event{
 		Namespace: in.namespace(), AppID: in.cfg.AppID, UserNative: msg.User, GroupNative: msg.Peer,
-		KnownGroup: group, AllowedGroups: in.policy().GroupIDs, Key: msg.Peer + "\x00" + msg.NativeID,
+		KnownGroup: group, UserBound: userBound, AllowedGroups: in.policy().GroupIDs, Key: msg.Peer + "\x00" + msg.NativeID,
 		Text: msg.Text, Time: msg.Time, Received: e.received,
 	})
 }

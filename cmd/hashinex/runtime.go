@@ -136,7 +136,7 @@ func (r *runtime) closeExcept(next *runtime) {
 func (r *runtime) serve(ctx context.Context, path string, localSetup bool) (*runtime, error) {
 	var level slog.LevelVar
 	_ = level.UnmarshalText([]byte(r.cfg.LogLevel))
-	r.output.SetLimits(r.cfg.Logging.MaxSize, r.cfg.Logging.Keep)
+	r.output.SetKeep(r.cfg.Logging.Keep)
 	log := slog.New(slog.NewJSONHandler(r.output, &slog.HandlerOptions{Level: &level}))
 	g := gateway.New(context.WithoutCancel(ctx), r.cfg, r.db, log, r.shares)
 	r.activateShares()
@@ -158,7 +158,7 @@ func (r *runtime) serve(ctx context.Context, path string, localSetup bool) (*run
 			}
 			g.ApplyLiveConfig(cfg)
 			_ = level.UnmarshalText([]byte(cfg.LogLevel))
-			r.output.SetLimits(cfg.Logging.MaxSize, cfg.Logging.Keep)
+			r.output.SetKeep(cfg.Logging.Keep)
 			currentConfig.Store(cfg)
 			log.Info("gateway configuration applied online")
 			return gateway.RestartInfo{Listen: cfg.Listen, AppliedLive: true}, nil

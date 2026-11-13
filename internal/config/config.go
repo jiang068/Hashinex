@@ -160,7 +160,7 @@ type Admin struct {
 
 type Logging struct {
 	File    string `yaml:"file,omitempty"`
-	MaxSize int64  `yaml:"max_size_bytes"`
+	MaxSize int64  `yaml:"max_size_bytes,omitempty"` // Legacy option accepted for existing configurations.
 	Keep    int    `yaml:"keep"`
 }
 
@@ -252,7 +252,7 @@ func ParseAt(raw []byte, path string) (*Config, error) {
 	cfg := Config{
 		Listen: "127.0.0.1:6700", LogLevel: "info",
 		Storage:   Storage{MessageTTL: 24 * time.Hour, ReplyWindow: 30 * time.Second},
-		Logging:   Logging{MaxSize: 10 << 20, Keep: 3},
+		Logging:   Logging{Keep: 3},
 		TempFiles: TempFiles{Listen: "127.0.0.1:6701", Directory: "tempfiles", TTL: 10 * time.Minute, MaxBytes: 512 << 20},
 		Matching: Matching{Mode: "off", PairWindow: 2 * time.Second, EventTTL: 5 * time.Second,
 			EvidenceTTL: 24 * time.Hour, Successes: 3, GroupSuccesses: 3, GroupSenders: 2, Distance: 4},
@@ -315,11 +315,8 @@ func (cfg *Config) validate(secrets map[string]string) error {
 	if cfg.Admin.AllowRemote && cfg.Admin.Token == "" {
 		return fmt.Errorf("「管理访问 → 允许从其他主机访问 WebUI」（admin.allow_remote）需要管理令牌。请设置管理令牌，或关闭远程访问。")
 	}
-	if cfg.Logging.MaxSize < 4096 || cfg.Logging.MaxSize > 1<<30 {
-		return fmt.Errorf("日志单文件大小（logging.max_size_bytes）须在 4096 字节到 1 GiB 之间。")
-	}
-	if cfg.Logging.Keep < 1 || cfg.Logging.Keep > 20 {
-		return fmt.Errorf("日志保留份数（logging.keep）须在 1 到 20 之间。")
+	if cfg.Logging.Keep < 1 {
+		return fmt.Errorf("「文件日志 → 保留天数」（logging.keep）须为正整数，包含当天的日志文件。")
 	}
 	limits := cfg.Limits
 	for _, limit := range []struct {

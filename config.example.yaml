@@ -7,6 +7,7 @@ storage:
   sqlite: "../data/hashinex.sqlite"
 logging:
   file: "../data/hashinex.jsonl"
+  keep: 3
 
 limits:
   frame_bytes: 1048576

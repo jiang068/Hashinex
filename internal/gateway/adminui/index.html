@@ -51,7 +51,7 @@
     <div class="workspace-body">
       <header class="topbar">
         <span>控制台 <span class="breadcrumb-slash">/</span> <strong id="breadcrumb">仪表盘</strong></span>
-        <div class="actions"><span class="refresh-time" id="refresh-time"></span><button type="button" id="refresh">刷新</button><button type="button" id="restart" hidden>应用配置</button><button id="logout" type="button">退出</button></div>
+        <div class="actions"><span class="refresh-time" id="refresh-time"></span><button type="button" id="refresh">刷新</button><button type="button" id="apply-config" hidden>应用配置</button><button type="button" id="restart" hidden>重启网关</button><button id="logout" type="button">退出</button></div>
       </header>
       <main id="main">
         <div class="save-bar" id="draft-bar" hidden>
@@ -134,7 +134,7 @@
           </article>
         </section>
         <section id="settings" hidden>
-          <div class="page-heading"><div><h1>系统设置</h1><p>配置监听、数据库、匹配、队列和日志。</p></div><button type="button" id="reconnect" hidden>重连输入和输出</button></div>
+          <div class="page-heading"><div><h1>系统设置</h1><p>配置监听、数据库、匹配、队列和日志。</p></div></div>
           <div class="settings-grid" id="settings-list"></div>
           <details class="panel yaml-panel" id="yaml-panel">
             <summary>高级 YAML 编辑器</summary>

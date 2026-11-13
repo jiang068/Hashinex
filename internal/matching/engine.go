@@ -22,6 +22,7 @@ type Event struct {
 	UserNative    string
 	GroupNative   string
 	KnownGroup    int64
+	UserBound     bool
 	AllowedGroups []string
 	UserID        int64
 	GroupID       int64
@@ -142,7 +143,8 @@ func (e *Engine) Run(ctx context.Context) {
 						continue
 					}
 					official.considered = true
-					if age > e.cfg.EventTTL {
+					// Bound users in known groups still count toward pairing ambiguity.
+					if age > e.cfg.EventTTL || official.UserBound {
 						continue
 					}
 					if observed, ok := uniquePair(queue, *official, e.cfg.PairWindow); ok {
