@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -90,4 +91,8 @@ func (c *Client) GroupMembers(ctx context.Context, group string) ([]GroupMember,
 
 func AvatarURL(appID, openID string) string {
 	return "https://q.qlogo.cn/qqapp/" + url.PathEscape(appID) + "/" + url.PathEscape(openID) + "/100"
+}
+
+func QQAvatarURL(qq int64) string {
+	return "https://q.qlogo.cn/g?b=qq&nk=" + strconv.FormatInt(qq, 10) + "&s=100"
 }

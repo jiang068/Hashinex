@@ -16,10 +16,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"hashinex/internal/config"
+	"hashinex/internal/qqofficial"
 	"hashinex/internal/store"
 )
 
@@ -34,10 +36,11 @@ type admin struct {
 	modified     bool
 	restarting   bool
 	restartError string
-	restart      func(context.Context) (RestartInfo, error)
+	restart      func(context.Context, bool) (RestartInfo, error)
 }
 
 type RestartInfo struct {
+	AppliedLive   bool   `json:"applied_live"`
 	Listen        string `json:"listen"`
 	ListenChanged bool   `json:"listen_changed"`
 }
@@ -54,7 +57,7 @@ func (g *Gateway) ConfigureLocalSetup(path string, logs func() []string) {
 	}
 }
 
-func (g *Gateway) ConfigureRestart(restart func(context.Context) (RestartInfo, error), previousError string) {
+func (g *Gateway) ConfigureRestart(restart func(context.Context, bool) (RestartInfo, error), previousError string) {
 	if g.admin != nil {
 		g.admin.restart = restart
 		g.admin.restartError = previousError
@@ -86,21 +89,26 @@ func (g *Gateway) adminRestart(w http.ResponseWriter, r *http.Request) {
 	a := g.admin
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.restarting {
+	if a.restarting || g.draining.Load() {
 		http.Error(w, "网关正在重启", http.StatusConflict)
 		return
 	}
-	info, err := a.restart(r.Context())
+	info, err := a.restart(r.Context(), r.URL.Query().Get("force") == "1")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	a.restarting = true
+	a.restarting = !info.AppliedLive
+	if info.AppliedLive {
+		a.modified = false
+	}
 	a.restartError = ""
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"listen": info.Listen, "listen_changed": info.ListenChanged, "generation": g.generation,
+	if !info.AppliedLive {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+	}
+	writeJSON(w, map[string]any{
+		"listen": info.Listen, "listen_changed": info.ListenChanged, "generation": g.generation, "applied_live": info.AppliedLive,
 	})
 }
 
@@ -124,7 +132,7 @@ func (a *admin) protect(checkToken bool, handler http.HandlerFunc) http.HandlerF
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https://q.qlogo.cn https://q1.qlogo.cn https://thirdqq.qlogo.cn; frame-ancestors 'none'; base-uri 'none'")
 		if checkToken && !authorized(r, a.config.Token) {
 			http.Error(w, "invalid admin token", http.StatusUnauthorized)
 			return
@@ -145,7 +153,8 @@ func (g *Gateway) adminState(w http.ResponseWriter, _ *http.Request) {
 		Input            string `json:"input,omitempty"`
 		Online           bool   `json:"online"`
 		Writable         bool   `json:"writable"`
-		Queued           int    `json:"queued,omitempty"`
+		Queued           int    `json:"queued"`
+		Undelivered      uint64 `json:"undelivered,omitempty"`
 	}
 	g.mu.Lock()
 	inputs := make([]endpoint, 0, len(g.inputs))
@@ -163,9 +172,13 @@ func (g *Gateway) adminState(w http.ResponseWriter, _ *http.Request) {
 		inputs = append(inputs, entry)
 	}
 	for _, r := range g.routes {
+		queued := 0
+		if r.peer != nil {
+			queued = r.peer.QueuedEvents()
+		}
 		outputs = append(outputs, endpoint{
 			ID: r.output.ID, Protocol: r.output.Protocol, Mode: r.output.Mode, SelfID: r.input.cfg.SelfID, Input: r.cfg.From,
-			Online: r.peer != nil, Writable: r.cfg.AllowActions,
+			Online: r.peer != nil, Writable: r.policy().AllowActions, Queued: queued, Undelivered: r.undelivered.Load(),
 		})
 	}
 	g.mu.Unlock()
@@ -248,7 +261,9 @@ func (g *Gateway) adminCandidates(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		writeJSON(w, result)
+		writeJSON(w, store.Page[adminCandidate]{
+			Rows: withCandidateAvatars(result.Rows), Page: result.Page, Size: result.Size, Total: result.Total,
+		})
 		return
 	}
 	if g.store == nil {
@@ -262,7 +277,30 @@ func (g *Gateway) adminCandidates(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "candidate query failed", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, rows)
+	writeJSON(w, withCandidateAvatars(rows))
+}
+
+type adminCandidate struct {
+	store.Candidate
+	OfficialAvatarURL string `json:"official_avatar_url,omitempty"`
+	QQAvatarURL       string `json:"qq_avatar_url,omitempty"`
+}
+
+func withCandidateAvatars(rows []store.Candidate) []adminCandidate {
+	result := make([]adminCandidate, 0, len(rows))
+	for _, row := range rows {
+		item := adminCandidate{Candidate: row}
+		if row.Kind == "user" {
+			if appID, ok := strings.CutPrefix(row.Namespace, "qq:"); ok && appID != "" && row.Native != "" {
+				item.OfficialAvatarURL = qqofficial.AvatarURL(strings.TrimSuffix(appID, ":c2c"), row.Native)
+			}
+			if row.Real > 0 && row.Real < store.VirtualBase {
+				item.QQAvatarURL = qqofficial.QQAvatarURL(row.Real)
+			}
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func adminPage(query url.Values) (int, int) {

@@ -27,6 +27,8 @@ import (
 
 type input struct {
 	cfg            config.Input
+	livePolicy     atomic.Pointer[config.Input]
+	timing         *transport.Timing
 	observes       bool
 	peer           *transport.Peer
 	events         chan event
@@ -55,6 +57,8 @@ type event struct {
 
 type route struct {
 	cfg             config.Route
+	livePolicy      atomic.Pointer[config.Route]
+	timing          *transport.Timing
 	input           *input
 	groupSender     *input
 	output          config.Output
@@ -63,9 +67,12 @@ type route struct {
 	recent          []receipt
 	recentAt        int
 	incompleteUntil time.Time
+	undelivered     atomic.Uint64
 }
 
 type call struct {
+	request    string
+	policy     *config.Route
 	input      *input
 	upstream   *transport.Peer
 	route      *route
@@ -149,11 +156,14 @@ func New(parent context.Context, cfg *config.Config, db *store.Store, log *slog.
 		g.workers.Go(func() { g.matcher.Run(g.ctx) })
 	}
 	outputs := make(map[string]config.Output, len(cfg.Outputs))
+	outputTiming := make(map[string]*transport.Timing, len(cfg.Outputs))
 	for _, output := range cfg.Outputs {
 		outputs[output.ID] = output
+		outputTiming[output.ID] = transport.NewTiming(heartbeatInterval(output.Endpoint, g.limits.PingInterval), output.ReconnectInterval)
 	}
 	for _, entry := range cfg.Inputs {
 		in := &input{cfg: entry, observes: cfg.Matching.Observes(entry), events: make(chan event, cfg.Limits.EventQueue)}
+		in.timing = transport.NewTiming(heartbeatInterval(entry.Endpoint, g.limits.PingInterval), entry.ReconnectInterval)
 		if entry.Protocol == config.QQOfficial {
 			in.official = qqofficial.NewClient(entry.AppID, entry.Secret, entry.APIOrigin, cfg.Limits.APITimeout)
 			in.officialEvents = make(chan officialEnvelope, cfg.Limits.EventQueue)
@@ -182,7 +192,7 @@ func New(parent context.Context, cfg *config.Config, db *store.Store, log *slog.
 		for _, target := range entry.Targets() {
 			selected := entry
 			selected.To = target
-			r := &route{cfg: selected, input: source, groupSender: groupSender, output: outputs[target]}
+			r := &route{cfg: selected, input: source, groupSender: groupSender, output: outputs[target], timing: outputTiming[target]}
 			source.routes = append(source.routes, r)
 			g.routes[[2]string{target, entry.From}] = r
 		}
@@ -242,6 +252,9 @@ func (g *Gateway) Drain(ctx context.Context) {
 		case <-tick.C:
 			g.mu.Lock()
 			idle := len(g.pending) == 0 && g.eventWork.Load() == 0
+			for _, in := range g.inputs {
+				idle = idle && (in.peer == nil || in.peer.PendingWrites() == 0)
+			}
 			for _, r := range g.routes {
 				idle = idle && (r.peer == nil || r.peer.PendingWrites() == 0)
 			}
@@ -310,7 +323,7 @@ func (g *Gateway) runGScore(listen string, routes []*route) {
 	for _, r := range routes {
 		targets = append(targets, gscore.Target{SelfID: r.input.cfg.SelfID, URL: local + r.cfg.From, Token: g.internalToken})
 	}
-	link := gscore.ManagedConnection(output.ID, output.URL, output.Token, targets, g.limits.GScoreFrameBytes)
+	link := gscore.ManagedConnection(output.ID, output.URL, output.Token, targets, g.limits.GScoreFrameBytes, routes[0].timing)
 	gscore.Run(g.ctx, []gscore.Connection{link}, g.log)
 }
 
@@ -394,7 +407,7 @@ func (g *Gateway) fromInput(in *input, peer *transport.Peer, raw []byte) {
 		return
 	}
 	if !g.beginEvent() {
-		if !in.cfg.Silent(onebot.ID(frame.GroupID), "") {
+		if !in.policy().Silent(onebot.ID(frame.GroupID), "") {
 			g.stats.dropped.Add(1)
 		}
 		return
@@ -406,7 +419,7 @@ func (g *Gateway) fromInput(in *input, peer *transport.Peer, raw []byte) {
 	default:
 		g.eventWork.Add(-1)
 		g.stats.dropped.Add(1)
-		if in.cfg.Silent(onebot.ID(frame.GroupID), "") {
+		if in.policy().Silent(onebot.ID(frame.GroupID), "") {
 			return
 		}
 		g.log.Warn("upstream event queue full", "input", in.cfg.ID)
@@ -415,6 +428,7 @@ func (g *Gateway) fromInput(in *input, peer *transport.Peer, raw []byte) {
 }
 
 func (g *Gateway) reportUndelivered(r *route, count int) {
+	r.undelivered.Add(uint64(count))
 	g.stats.dropped.Add(uint64(count))
 	g.log.Warn("downstream events undelivered", "input", r.cfg.From, "output", r.cfg.To, "count", count)
 }

@@ -46,11 +46,11 @@ func (in *input) userNamespace(kind string) string {
 }
 
 func (in *input) officialGroupAllowed(id int64) bool {
-	return filterAllows(in.cfg.GroupIDs, strconv.FormatInt(id, 10))
+	return filterAllows(in.policy().GroupIDs, strconv.FormatInt(id, 10))
 }
 
 func (in *input) officialPrivateAllowed(id int64) bool {
-	return in.cfg.PrivateEnabled() && id > 0 && filterAllows(in.cfg.PrivateQQIDs, strconv.FormatInt(id, 10))
+	return in.cfg.PrivateEnabled() && id > 0 && filterAllows(in.policy().PrivateQQIDs, strconv.FormatInt(id, 10))
 }
 
 func (g *Gateway) startOfficial(in *input) {
@@ -85,7 +85,7 @@ func (g *Gateway) startOfficial(in *input) {
 	}
 	if in.cfg.Events == "gateway" {
 		g.workers.Go(func() {
-			in.official.RunGateway(g.ctx, in.cfg.Intents, g.limits.FrameBytes, func(d qqofficial.Dispatch) bool {
+			in.official.RunGateway(g.ctx, in.cfg.Intents, g.limits.FrameBytes, in.timing, func(d qqofficial.Dispatch) bool {
 				return g.ingestOfficial(in, d)
 			}, in.online.Store, g.log.With("input", in.cfg.ID))
 		})
@@ -209,7 +209,7 @@ func (g *Gateway) convertOfficial(in *input, e officialEnvelope) {
 		}
 	}
 	g.stats.received.Add(1)
-	silent := msg.Kind == "group" && in.cfg.Silent(strconv.FormatInt(knownGroup, 10), "")
+	silent := msg.Kind == "group" && in.policy().Silent(strconv.FormatInt(knownGroup, 10), "")
 	raw := e.dispatch.Raw
 	if raw == nil {
 		raw, _ = json.Marshal(e.dispatch)
@@ -226,7 +226,7 @@ func (g *Gateway) convertOfficial(in *input, e officialEnvelope) {
 	if msgTime.IsZero() {
 		msgTime = e.received
 	}
-	ref, created, err := g.store.CreateMessage(ctx, store.Message{
+	ref, created, err := g.store.CreateIncomingMessage(ctx, store.Message{
 		Namespace: ns, ChatKind: msg.Kind, Peer: msg.Peer, UserNative: msg.User,
 		NativeID: msg.NativeID, EventID: msg.EventID, ReferenceID: msg.ReferenceID,
 		Incoming: true, ReceivedAt: e.received, ExpiresAt: e.received.Add(g.storage.MessageTTL),
@@ -284,7 +284,7 @@ func (g *Gateway) offerOfficialMatch(in *input, e officialEnvelope, msg qqoffici
 	}
 	g.matcher.Offer(matching.Event{
 		Namespace: in.namespace(), AppID: in.cfg.AppID, UserNative: msg.User, GroupNative: msg.Peer,
-		KnownGroup: group, AllowedGroups: in.cfg.GroupIDs, Key: msg.Peer + "\x00" + msg.NativeID,
+		KnownGroup: group, AllowedGroups: in.policy().GroupIDs, Key: msg.Peer + "\x00" + msg.NativeID,
 		Text: msg.Text, Time: msg.Time, Received: e.received,
 	})
 }

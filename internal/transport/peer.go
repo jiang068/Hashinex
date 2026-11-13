@@ -18,27 +18,41 @@ type packet struct {
 }
 
 type Peer struct {
-	ctx      context.Context
-	cancel   context.CancelCauseFunc
-	conn     *websocket.Conn
-	events   chan packet
-	api      chan packet
-	limits   config.Limits
-	log      *slog.Logger
-	buffered atomic.Int64
+	ctx              context.Context
+	cancel           context.CancelCauseFunc
+	conn             *websocket.Conn
+	events           chan packet
+	api              chan packet
+	limits           config.Limits
+	log              *slog.Logger
+	buffered         atomic.Int64
+	enqueueMu        sync.Mutex
+	timing           *Timing
+	restart          atomic.Bool
+	restartRequested chan struct{}
 }
 
-func NewPeer(parent context.Context, conn *websocket.Conn, limits config.Limits, log *slog.Logger) *Peer {
+func NewPeer(parent context.Context, conn *websocket.Conn, limits config.Limits, timing *Timing, log *slog.Logger) *Peer {
 	ctx, cancel := context.WithCancelCause(parent)
 	conn.SetReadLimit(limits.FrameBytes)
 	return &Peer{
-		ctx: ctx, cancel: cancel, conn: conn, limits: limits, log: log,
+		ctx: ctx, cancel: cancel, conn: conn, limits: limits, log: log, timing: timing,
 		events: make(chan packet, limits.EventQueue), api: make(chan packet, limits.APIQueue),
+		restartRequested: make(chan struct{}),
 	}
 }
 
 func (p *Peer) Stop(cause error) {
 	p.cancel(cause)
+}
+
+// RequestRestart lets the writer send the close handshake while the reader is alive.
+func (p *Peer) RequestRestart() {
+	p.enqueueMu.Lock()
+	defer p.enqueueMu.Unlock()
+	if p.restart.CompareAndSwap(false, true) {
+		close(p.restartRequested)
+	}
 }
 
 func (p *Peer) SendEvent(raw []byte, deadline time.Time) bool {
@@ -50,7 +64,9 @@ func (p *Peer) SendAPI(raw []byte, deadline time.Time) bool {
 }
 
 func (p *Peer) enqueue(queue chan packet, msg packet) bool {
-	if p.ctx.Err() != nil {
+	p.enqueueMu.Lock()
+	defer p.enqueueMu.Unlock()
+	if p.ctx.Err() != nil || p.restart.Load() {
 		return false
 	}
 	p.buffered.Add(1)
@@ -66,6 +82,14 @@ func (p *Peer) enqueue(queue chan packet, msg packet) bool {
 
 func (p *Peer) PendingWrites() int64 {
 	return p.buffered.Load()
+}
+
+func (p *Peer) Closed() bool {
+	return p.ctx.Err() != nil
+}
+
+func (p *Peer) QueuedEvents() int {
+	return len(p.events)
 }
 
 func (p *Peer) Run(onFrame func([]byte), onUndelivered func(int)) {
@@ -116,7 +140,13 @@ func (p *Peer) guard(worker string, run func()) {
 }
 
 func (p *Peer) write(onUndelivered func(int)) {
+	restart := p.restartRequested
 	for p.ctx.Err() == nil {
+		if p.restart.Load() && p.PendingWrites() == 0 {
+			_ = p.conn.Close(websocket.StatusServiceRestart, "configuration applied")
+			p.Stop(errors.New("gateway configuration applied"))
+			return
+		}
 		var msg packet
 		var event bool
 		select {
@@ -125,6 +155,9 @@ func (p *Peer) write(onUndelivered func(int)) {
 			select {
 			case <-p.ctx.Done():
 				return
+			case <-restart:
+				restart = nil
+				continue
 			case msg = <-p.api:
 			case msg = <-p.events:
 				event = true
@@ -159,20 +192,11 @@ func (p *Peer) write(onUndelivered func(int)) {
 }
 
 func (p *Peer) ping() {
-	ticker := time.NewTicker(p.limits.PingInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(p.ctx, p.limits.WriteTimeout)
-			err := p.conn.Ping(ctx)
-			cancel()
-			if err != nil {
-				p.Stop(errors.New("websocket ping timeout"))
-				return
-			}
-		}
+	if err := p.timing.Heartbeat(p.ctx, func() error {
+		ctx, cancel := context.WithTimeout(p.ctx, p.limits.WriteTimeout)
+		defer cancel()
+		return p.conn.Ping(ctx)
+	}); err != nil {
+		p.Stop(errors.New("websocket ping timeout"))
 	}
 }

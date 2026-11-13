@@ -90,7 +90,7 @@ func (g *Gateway) hasPrivateObserver(official *input) bool {
 			continue
 		}
 		for group, at := range in.observerGroups {
-			if now.Sub(at) <= observerGroupTTL && filterAllows(official.cfg.GroupIDs, group) {
+			if now.Sub(at) <= observerGroupTTL && filterAllows(official.policy().GroupIDs, group) {
 				return true
 			}
 		}

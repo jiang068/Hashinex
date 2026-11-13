@@ -10,6 +10,8 @@ const isOfficial = draft => draft.protocol === "qq-official";
 const onebot = draft => !isOfficial(draft);
 const dials = draft => ["forward-dial", "reverse-dial"].includes(draft.ws_mode);
 const core = draft => draft.protocol === "gscore";
+const heartbeat = { placeholder: "20s", hint: "WebSocket Ping 间隔，留空继承系统设置。支持 1s 到 10m。" };
+const reconnect = { placeholder: "5s", hint: "断线后再次拨号的固定间隔，留空使用指数退避。支持 1s 到 10m。" };
 const password = { kind: "password", wide: true };
 const listener = { wide: true, placeholder: "/bot/onebot" };
 const name = { ...required, pattern: "[a-zA-Z0-9][a-zA-Z0-9_\\-]{0,63}" };
@@ -42,6 +44,8 @@ export const collections = {
       ["url", "WebSocket 地址", only({ ...required, wide: true, placeholder: "ws://127.0.0.1:端口/路径" }, draft => onebot(draft) && dials(draft))],
       ["connection_url", "反向 WebSocket 连接地址", only({ wide: true, preview: true, hint: "把完整地址填入上游适配器的反向 WebSocket 地址栏。" }, draft => onebot(draft) && draft.ws_mode === "reverse-listen")],
       ["listen_path", "自定义连接路径（可选）", only({ wide: true, hint: "留空时按输入名称生成。对外主机与端口可在「系统设置 → 网关服务」修改。" }, draft => onebot(draft) && draft.ws_mode === "reverse-listen")],
+      ["heartbeat_interval", "心跳间隔", only(heartbeat, onebot)],
+      ["reconnect_interval", "重连间隔", only(reconnect, draft => onebot(draft) ? dials(draft) : draft.events === "gateway")],
       ["token_value", "OneBot 令牌", only(password, onebot)],
       ["app_id", "AppID", only(positiveID, isOfficial)],
       ["secret_value", "AppSecret", only({ ...password, mandatory: true }, isOfficial)],
@@ -62,10 +66,14 @@ export const collections = {
       delete item.group_openids;
       delete item.private_openids;
       if (isOfficial(item)) {
-        for (const key of ["identity_source", "ws_mode", "url", "listen_path", "token_env", "token_ref", "token_value"]) delete item[key];
+        for (const key of ["identity_source", "ws_mode", "url", "listen_path", "token_env", "token_ref", "token_value", "heartbeat_interval"]) delete item[key];
+        if (item.events !== "gateway") delete item.reconnect_interval;
       } else {
         for (const key of ["app_id", "secret_env", "secret_ref", "secret_value", "events", "api_origin", "intents", "group_ids", "enable_private", "private_bind_group", "private_qq_ids", "allow_proactive", "observed_profiles"]) delete item[key];
-        if (!dials(item)) delete item.url;
+        if (!dials(item)) {
+          delete item.url;
+          delete item.reconnect_interval;
+        }
         else delete item.listen_path;
       }
       return item;
@@ -80,6 +88,8 @@ export const collections = {
       ["ws_mode", "连接方式", only(choices(...outputModes.map(key => [key, modes[key]])), draft => !core(draft))],
       ["url", "目标 WebSocket 地址", only({ ...required, wide: true, placeholder: "ws://127.0.0.1:8765/ws/hashinex", hint: "多只 Bot 共用 gscore 时，在各自路由里选择同一个输出。" }, draft => dials(draft) || core(draft))],
       ["listen_path", "监听路径", only({ ...listener, placeholder: "/astrbot/{input}", hint: "留空使用默认路径。多个来源共用时，使用 {input} 区分。" }, draft => !core(draft) && !dials(draft))],
+      ["heartbeat_interval", "心跳间隔", heartbeat],
+      ["reconnect_interval", "重连间隔", only(reconnect, draft => core(draft) || dials(draft))],
       ["official_file_root", "官 Bot 本地文件目录", only({ wide: true, hint: "填写此下游与网关共享的文件目录绝对路径。用于官 Bot 发送下游提供的本地文件。" }, draft => !core(draft))],
       ["token_value", "连接令牌", password]
     ],
@@ -91,7 +101,10 @@ export const collections = {
         delete item.listen_path;
         delete item.official_file_root;
       } else if (dials(item)) delete item.listen_path;
-      else delete item.url;
+      else {
+        delete item.url;
+        delete item.reconnect_interval;
+      }
       return item;
     }
   },

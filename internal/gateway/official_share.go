@@ -324,7 +324,7 @@ func (b *shareBuilder) history(ctx context.Context, id json.RawMessage) (json.Ra
 	var raw json.RawMessage
 	if in.official != nil {
 		message, err := b.g.store.Message(ctx, in.namespace(), numericID(id), time.Now())
-		if err != nil || message.ChatKind != b.kind || message.Peer != b.peer || !b.g.messageAllowed(ctx, b.call.route, message) {
+		if err != nil || message.ChatKind != b.kind || message.Peer != b.peer || !b.g.messageAllowed(ctx, b.call.route, b.call.policy, message) {
 			return nil, "", unavailable
 		}
 		raw = message.Packet

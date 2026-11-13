@@ -94,7 +94,7 @@ func (c *Client) AccessToken(ctx context.Context) (string, error) {
 	}
 	err := c.request(ctx, apiBase, http.MethodPost, "/app/getAppAccessToken", "", map[string]string{
 		"appId": c.appID, "clientSecret": c.secret,
-	}, &response)
+	}, &response, nil)
 	if err != nil {
 		return "", err
 	}
@@ -114,11 +114,26 @@ func (c *Client) AccessToken(ctx context.Context) (string, error) {
 }
 
 func (c *Client) Do(ctx context.Context, method, path string, body, dest any) error {
+	return c.do(ctx, method, path, body, dest, nil)
+}
+
+type ResponseInfo struct {
+	Status  int
+	TraceID string
+}
+
+func (c *Client) DoWithResponseInfo(ctx context.Context, method, path string, body, dest any) (ResponseInfo, error) {
+	var info ResponseInfo
+	err := c.do(ctx, method, path, body, dest, &info)
+	return info, err
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body, dest any, info *ResponseInfo) error {
 	token, err := c.AccessToken(ctx)
 	if err != nil {
 		return err
 	}
-	err = c.request(ctx, c.base, method, path, token, body, dest)
+	err = c.request(ctx, c.base, method, path, token, body, dest, info)
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 		c.tokenMu.Lock()
@@ -130,7 +145,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, dest any) er
 	return err
 }
 
-func (c *Client) request(ctx context.Context, base, method, path, token string, body, dest any) error {
+func (c *Client) request(ctx context.Context, base, method, path, token string, body, dest any, info *ResponseInfo) error {
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -162,6 +177,10 @@ func (c *Client) request(ctx context.Context, base, method, path, token string, 
 		return fmt.Errorf("QQ API transport failure on %s: %w", method, err)
 	}
 	defer res.Body.Close()
+	if info != nil {
+		info.Status = res.StatusCode
+		info.TraceID = responseTraceID(res.Header, "")
+	}
 	const maxResponse = 2 << 20
 	raw, err := io.ReadAll(io.LimitReader(res.Body, maxResponse+1))
 	if err != nil || len(raw) > maxResponse {
@@ -174,17 +193,13 @@ func (c *Client) request(ctx context.Context, base, method, path, token string, 
 		TraceID string `json:"trace_id"`
 	}
 	_ = json.Unmarshal(raw, &meta)
+	if info != nil && info.TraceID == "" {
+		info.TraceID = responseTraceID(res.Header, meta.TraceID)
+	}
 	code := cmp.Or(meta.Code, meta.ErrCode)
 	if res.StatusCode < 200 || res.StatusCode >= 300 || code != 0 {
-		traceID := res.Header.Get("X-Tps-Trace-ID")
-		if !qqTraceIDPattern.MatchString(traceID) {
-			traceID = meta.TraceID
-			if !qqTraceIDPattern.MatchString(traceID) {
-				traceID = ""
-			}
-		}
 		return &APIError{
-			Status: res.StatusCode, Code: code, TraceID: traceID,
+			Status: res.StatusCode, Code: code, TraceID: responseTraceID(res.Header, meta.TraceID),
 			message: redactQQMessage(meta.Message, token, c.secret, c.appID),
 		}
 	}
@@ -194,6 +209,16 @@ func (c *Client) request(ctx context.Context, base, method, path, token string, 
 		}
 	}
 	return nil
+}
+
+func responseTraceID(header http.Header, bodyTraceID string) string {
+	if id := header.Get("X-Tps-Trace-ID"); qqTraceIDPattern.MatchString(id) {
+		return id
+	}
+	if qqTraceIDPattern.MatchString(bodyTraceID) {
+		return bodyTraceID
+	}
+	return ""
 }
 
 func ConversationPath(kind, peer string) string {

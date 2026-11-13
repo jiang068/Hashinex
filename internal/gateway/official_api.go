@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"hashinex/internal/config"
 	"hashinex/internal/onebot"
 	"hashinex/internal/qqofficial"
 	"hashinex/internal/store"
@@ -51,13 +52,15 @@ func (g *Gateway) performOfficial(job officialJob) {
 			response = onebot.Failure(job.call.echo, 1403, "QQ app lacks permission for this profile API (11253)")
 		case errors.As(err, &api):
 			g.log.WarnContext(ctx, "QQ official API action failed",
-				"input", job.call.input.cfg.ID, "action", job.frame.Action,
+				"input", job.call.route.input.cfg.ID, "sender", job.call.input.cfg.ID, "output", job.call.route.output.ID,
+				"request", job.key, "action", job.frame.Action, "elapsed", time.Since(job.call.start),
 				"http_status", api.Status, "qq_code", api.Code, "qq_trace_id", api.TraceID)
 			response = onebot.Failure(job.call.echo, 1502, err.Error())
 		case errors.Is(err, context.DeadlineExceeded):
 			response = onebot.Failure(job.call.echo, 1504, "official action timed out; result unknown")
 		default:
-			g.log.Warn("official action failed", "input", job.call.input.cfg.ID, "request", job.key, "reason", err)
+			g.log.Warn("official action failed", "input", job.call.route.input.cfg.ID, "sender", job.call.input.cfg.ID,
+				"output", job.call.route.output.ID, "request", job.key, "action", job.frame.Action, "elapsed", time.Since(job.call.start), "reason", err)
 			response = onebot.Failure(job.call.echo, 1502, "official action failed; result may be unknown")
 		}
 	}
@@ -123,7 +126,7 @@ func (g *Gateway) invokeOfficial(ctx context.Context, c call, frame onebot.Frame
 		if err != nil {
 			return nil, err
 		}
-		if !g.messageAllowed(ctx, c.route, msg) {
+		if !g.messageAllowed(ctx, c.route, c.policy, msg) {
 			return nil, actionError{1403, "message is outside the route scope"}
 		}
 		if frame.Action == "get_msg" {
@@ -232,8 +235,8 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	if kind == "group" {
 		group = target
 	}
-	if !c.route.allowsConversation(kind, group) ||
-		(kind == "private" && !filterAllows(c.route.cfg.Users, target)) {
+	if !allowsConversation(c.policy, kind, group) ||
+		(kind == "private" && !filterAllows(c.policy.Users, target)) {
 		return nil, actionError{1403, "target is outside the route scope"}
 	}
 	shareRaw := p.Message
@@ -319,7 +322,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	if refID == 0 {
 		refID = quoteID
 	}
-	if refID == 0 && !redirected && c.route.cfg.ImplicitReply == "unique-recent" {
+	if refID == 0 && !redirected && c.policy.ImplicitReply == "unique-recent" {
 		refID, err = g.recentReply(c, kind, peer, time.Now())
 		if err != nil {
 			return nil, err
@@ -336,7 +339,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		if err != nil {
 			return nil, err
 		}
-		if ref.ChatKind != kind || ref.Peer != peer || !g.messageAllowed(ctx, c.route, ref) {
+		if ref.ChatKind != kind || ref.Peer != peer || !g.messageAllowed(ctx, c.route, c.policy, ref) {
 			return nil, actionError{1403, "reply context belongs to a different conversation or route"}
 		}
 	}
@@ -348,7 +351,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 				return nil, err
 			}
 		}
-		if quote.ChatKind != kind || quote.Peer != peer || !g.messageAllowed(ctx, c.route, quote) {
+		if quote.ChatKind != kind || quote.Peer != peer || !g.messageAllowed(ctx, c.route, c.policy, quote) {
 			return nil, actionError{1403, "quote belongs to a different conversation or route"}
 		}
 		if quote.ReferenceID == "" {
@@ -410,7 +413,27 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 	var sent struct {
 		ID string `json:"id"`
 	}
-	sendErr := c.input.official.Do(ctx, http.MethodPost, path, body, &sent)
+	send := func(attempt int) error {
+		info, err := c.input.official.DoWithResponseInfo(ctx, http.MethodPost, path, body, &sent)
+		fields := []any{"input", c.route.input.cfg.ID, "sender", c.input.cfg.ID, "app_id", c.input.cfg.AppID,
+			"output", c.route.output.ID, "request", c.request, "action", action, "chat_kind", kind,
+			"attempt", attempt, "elapsed", time.Since(c.start), "http_status", info.Status, "qq_trace_id", info.TraceID,
+			"passive", ref.Incoming, "share", share.address != ""}
+		if kind == "group" && record.Real != 0 {
+			fields = append(fields, "group_id", record.Real)
+		}
+		var api *qqofficial.APIError
+		if errors.As(err, &api) {
+			fields = append(fields, "qq_code", api.Code)
+		}
+		if err == nil && sent.ID != "" {
+			g.log.InfoContext(ctx, "QQ accepted message", fields...)
+		} else {
+			g.log.WarnContext(ctx, "QQ message send did not confirm delivery", fields...)
+		}
+		return err
+	}
+	sendErr := send(1)
 	var api *qqofficial.APIError
 	// A transport or server error can leave the delivery status unknown.
 	if g.shares != nil && ctx.Err() == nil && errors.As(sendErr, &api) && api.Status < http.StatusInternalServerError {
@@ -432,7 +455,7 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 		body["msg_type"] = 0
 		delete(body, "media")
 		delete(body, "message_reference")
-		sendErr = c.input.official.Do(ctx, http.MethodPost, path, body, &sent)
+		sendErr = send(2)
 	}
 	if sendErr != nil {
 		return nil, sendErr
@@ -465,7 +488,8 @@ func (g *Gateway) sendOfficial(ctx context.Context, c call, action string, p act
 
 func (g *Gateway) officialShareFallback(ctx context.Context, c call, action, kind, peer string, target int64, raw json.RawMessage, literal bool, phase string, cause error) (officialShare, error) {
 	share, err := g.publishOfficialShare(ctx, c, kind, peer, target, raw, literal)
-	fields := []any{"input", c.input.cfg.ID, "output", c.route.output.ID, "action", action, "phase", phase}
+	fields := []any{"input", c.route.input.cfg.ID, "sender", c.input.cfg.ID, "output", c.route.output.ID,
+		"request", c.request, "action", action, "phase", phase}
 	var api *qqofficial.APIError
 	if errors.As(cause, &api) {
 		fields = append(fields, "http_status", api.Status, "qq_code", api.Code, "qq_trace_id", api.TraceID)
@@ -483,29 +507,29 @@ func (g *Gateway) officialShareFallback(ctx context.Context, c call, action, kin
 }
 
 func (in *input) officialBusinessGroup(id int64) bool {
-	return in.officialGroupAllowed(id) && !in.cfg.Silent(strconv.FormatInt(id, 10), "")
+	return in.officialGroupAllowed(id) && !in.policy().Silent(strconv.FormatInt(id, 10), "")
 }
 
-func (g *Gateway) messageAllowed(ctx context.Context, r *route, msg store.Message) bool {
+func (g *Gateway) messageAllowed(ctx context.Context, r *route, policy *config.Route, msg store.Message) bool {
 	in := r.input
 	if msg.ChatKind == "private" {
 		user, err := g.store.Lookup(ctx, store.Identity{Namespace: in.userNamespace("private"), Kind: "user", Native: msg.Peer})
-		return err == nil && in.officialPrivateAllowed(user.Real) && r.allowsConversation("private", "") &&
-			filterAllows(r.cfg.Users, strconv.FormatInt(user.Real, 10))
+		return err == nil && in.officialPrivateAllowed(user.Real) && allowsConversation(policy, "private", "") &&
+			filterAllows(policy.Users, strconv.FormatInt(user.Real, 10))
 	}
 	group, err := g.store.Lookup(ctx, store.Identity{Namespace: in.namespace(), Kind: "group", Native: msg.Peer})
 	if err != nil || !in.officialBusinessGroup(group.Real) ||
-		!r.allowsConversation("group", strconv.FormatInt(group.Real, 10)) {
+		!allowsConversation(policy, "group", strconv.FormatInt(group.Real, 10)) {
 		return false
 	}
-	if len(r.cfg.Users) == 0 {
+	if len(policy.Users) == 0 {
 		return true
 	}
 	if !msg.Incoming {
-		return filterAllows(r.cfg.Users, in.cfg.SelfID)
+		return filterAllows(policy.Users, in.cfg.SelfID)
 	}
 	user, err := g.store.Lookup(ctx, store.Identity{Namespace: in.namespace(), Kind: "user", Native: msg.UserNative})
-	return err == nil && filterAllows(r.cfg.Users, strconv.FormatInt(user.Real, 10))
+	return err == nil && filterAllows(policy.Users, strconv.FormatInt(user.Real, 10))
 }
 
 func filterAllows(ids []string, id string) bool {

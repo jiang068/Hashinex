@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"hashinex/internal/config"
 	"hashinex/internal/onebot"
@@ -15,10 +16,12 @@ import (
 )
 
 type virtualJob struct {
-	key   string
-	call  call
-	raw   []byte
-	frame onebot.Frame
+	key         string
+	call        call
+	raw         []byte
+	frame       onebot.Frame
+	scopedGroup string
+	inputPolicy *config.Input
 }
 
 type virtualReply struct {
@@ -99,6 +102,22 @@ func (g *Gateway) performVirtual(job virtualJob) {
 	_, exists := g.pending[job.key]
 	g.mu.Unlock()
 	if !exists {
+		return
+	}
+	if job.scopedGroup != "" {
+		silent, err := g.oneBotGroupSilent(job.call.input, job.inputPolicy, job.scopedGroup, job.call.deadline)
+		if !time.Now().Before(job.call.deadline) {
+			return
+		}
+		if err != nil {
+			g.reject(job.key, 1502, "could not resolve group scope")
+			return
+		}
+		if silent || !allowsConversation(job.call.policy, "group", job.scopedGroup) {
+			g.reject(job.key, 1403, "group is outside the route scope or in silent mode")
+			return
+		}
+		g.sendUpstream(job.key, job.call, job.raw)
 		return
 	}
 	switch job.frame.Action {

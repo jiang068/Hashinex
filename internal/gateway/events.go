@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"hashinex/internal/config"
 	"hashinex/internal/matching"
 	"hashinex/internal/onebot"
 	"hashinex/internal/store"
@@ -87,7 +88,13 @@ func (g *Gateway) processEvent(in *input, e event, recent *list.List, byKey map[
 			g.observerGroupNotice(in, group, e.frame)
 		}
 	}
-	if g.oneBotGroupSilent(in, group, e.deadline) {
+	silent, err := g.oneBotGroupSilent(in, in.policy(), group, e.deadline)
+	if err != nil {
+		g.stats.dropped.Add(1)
+		g.log.Warn("could not resolve OneBot event group scope", "input", in.cfg.ID, "post_type", e.frame.PostType)
+		return
+	}
+	if silent {
 		g.stats.observed.Add(1)
 		return
 	}
@@ -120,18 +127,18 @@ func (g *Gateway) processEvent(in *input, e event, recent *list.List, byKey map[
 	g.routeEvent(in, e)
 }
 
-func (g *Gateway) oneBotGroupSilent(in *input, group string, deadline time.Time) bool {
+func (g *Gateway) oneBotGroupSilent(in *input, policy *config.Input, group string, deadline time.Time) (bool, error) {
 	native := group
-	if group != "" && in.virtualJobs != nil && (len(in.cfg.SilentGroups) != 0 || len(in.cfg.BusinessGroups) != 0) {
+	if group != "" && in.virtualJobs != nil && (len(policy.SilentGroups) != 0 || len(policy.BusinessGroups) != 0) {
 		ctx, cancel := context.WithDeadline(g.ctx, deadline)
 		defer cancel()
 		record, err := g.store.Resolve(ctx, store.Identity{Namespace: in.virtualNamespace(), Kind: "group", Native: group})
 		if err != nil {
-			return true
+			return false, err
 		}
 		group = strconv.FormatInt(record.ExternalID(), 10)
 	}
-	return in.cfg.Silent(group, native)
+	return policy.Silent(group, native), nil
 }
 
 func (in *input) normalizesEvents() bool {
@@ -203,20 +210,21 @@ func (g *Gateway) routeEvent(in *input, e event) {
 	g.stats.routingNanos.Add(uint64(max(0, time.Since(e.deadline.Add(-g.limits.EventTTL)))))
 	g.stats.routed.Add(1)
 	for _, r := range in.routes {
+		policy := r.policy()
 		raw, frame := e.raw, &e.frame
-		if r.cfg.Passthrough && e.original != nil {
+		if policy.Passthrough && e.original != nil {
 			raw = e.original
 			if e.originalFrame != nil {
 				frame = e.originalFrame
 			}
 		}
-		if raw == nil || !filterAllows(r.cfg.Events, frame.PostType) {
+		if raw == nil || !filterAllows(policy.Events, frame.PostType) {
 			continue
 		}
-		if !r.allowsConversation(frame.MessageType, onebot.ID(frame.GroupID)) {
+		if !allowsConversation(policy, frame.MessageType, onebot.ID(frame.GroupID)) {
 			continue
 		}
-		if !filterAllows(r.cfg.Users, onebot.ID(frame.UserID)) {
+		if !filterAllows(policy.Users, onebot.ID(frame.UserID)) {
 			continue
 		}
 		if time.Now().After(e.deadline) {
@@ -226,13 +234,13 @@ func (g *Gateway) routeEvent(in *input, e event) {
 		g.mu.Lock()
 		peer := r.peer
 		queued := peer != nil && peer.SendEvent(raw, e.deadline)
-		if queued && e.ref != nil && r.cfg.ImplicitReply == "unique-recent" {
+		if queued && e.ref != nil && policy.ImplicitReply == "unique-recent" {
 			g.remember(r, e.ref)
 		}
 		g.mu.Unlock()
 		if queued {
 			g.stats.enqueued.Add(1)
-			if r.cfg.Passthrough {
+			if policy.Passthrough {
 				g.stats.passthrough.Add(1)
 			}
 			continue
@@ -244,6 +252,6 @@ func (g *Gateway) routeEvent(in *input, e event) {
 	}
 }
 
-func (r *route) allowsConversation(kind, group string) bool {
-	return (kind == "private" && r.cfg.IncludePrivate) || filterAllows(r.cfg.Groups, group)
+func allowsConversation(policy *config.Route, kind, group string) bool {
+	return (kind == "private" && policy.IncludePrivate) || filterAllows(policy.Groups, group)
 }

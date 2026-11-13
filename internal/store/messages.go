@@ -3,12 +3,17 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var ErrMessageNotFound = errors.New("message context missing or expired")
+var errMessageCommit = errors.New("could not commit message context")
 
 type Message struct {
 	ID          int64
@@ -25,8 +30,41 @@ type Message struct {
 	ExpiresAt   time.Time
 }
 
+// CreateIncomingMessage retries temporary write contention within the event deadline.
+func (s *Store) CreateIncomingMessage(ctx context.Context, msg Message, build func(int64) ([]byte, error)) (Message, bool, error) {
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return Message{}, false, err
+		}
+		saved, created, err := s.CreateMessage(ctx, msg, build)
+		var sqliteErr *sqlite.Error
+		if attempt == maxAttempts || errors.Is(err, errMessageCommit) || !errors.As(err, &sqliteErr) {
+			return saved, created, err
+		}
+		// The low byte is the primary result code, including for extended errors.
+		switch sqliteErr.Code() & 0xff {
+		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+		default:
+			return saved, created, err
+		}
+		timer := time.NewTimer(time.Duration(attempt) * 25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return Message{}, false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (s *Store) CreateMessage(ctx context.Context, msg Message, build func(int64) ([]byte, error)) (Message, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return Message{}, false, err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return Message{}, false, err
 	}
@@ -59,7 +97,9 @@ func (s *Store) CreateMessage(ctx context.Context, msg Message, build func(int64
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return Message{}, false, err
+		// SQLite can leave a transaction open after a failed COMMIT.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return Message{}, false, errors.Join(errMessageCommit, err)
 	}
 	return msg, true, nil
 }

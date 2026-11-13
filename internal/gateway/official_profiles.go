@@ -27,7 +27,7 @@ func (g *Gateway) officialGroupTarget(ctx context.Context, c call, raw json.RawM
 	if id == 0 {
 		id = numericID(raw)
 	}
-	if !c.input.officialBusinessGroup(record.Real) || !filterAllows(c.route.cfg.Groups, strconv.FormatInt(id, 10)) {
+	if !c.input.officialBusinessGroup(record.Real) || !filterAllows(c.policy.Groups, strconv.FormatInt(id, 10)) {
 		return "", 0, actionError{1403, "group is outside the route scope"}
 	}
 	return peer, id, nil
@@ -48,7 +48,7 @@ func (g *Gateway) officialGroupProfile(ctx context.Context, c call, action strin
 	}
 	selfID, _ := strconv.ParseInt(in.cfg.SelfID, 10, 64)
 	if requested == selfID {
-		if !filterAllows(c.route.cfg.Users, in.cfg.SelfID) {
+		if !filterAllows(c.policy.Users, in.cfg.SelfID) {
 			return nil, actionError{1403, "user is outside the route scope"}
 		}
 		member, err := in.official.GroupMember(ctx, peer, "")
@@ -77,7 +77,7 @@ func (g *Gateway) officialGroupProfile(ctx context.Context, c call, action strin
 	if userID == 0 {
 		userID = requested
 	}
-	if !filterAllows(c.route.cfg.Users, strconv.FormatInt(userID, 10)) {
+	if !filterAllows(c.policy.Users, strconv.FormatInt(userID, 10)) {
 		return nil, actionError{1403, "user is outside the route scope"}
 	}
 	member, err := in.official.GroupMember(ctx, peer, native)
@@ -134,7 +134,7 @@ func (g *Gateway) officialMemberList(ctx context.Context, c call, peer string, g
 	for _, member := range members {
 		var id int64
 		if self == member.OpenID {
-			if filterAllows(c.route.cfg.Users, in.cfg.SelfID) {
+			if filterAllows(c.policy.Users, in.cfg.SelfID) {
 				id, _ = strconv.ParseInt(in.cfg.SelfID, 10, 64)
 			}
 		} else {
@@ -157,10 +157,10 @@ func (g *Gateway) officialProfileID(ctx context.Context, c call, native string) 
 		return 0, err
 	}
 	id := record.ExternalID()
-	if id == 0 && len(c.route.cfg.Users) == 0 {
+	if id == 0 && len(c.policy.Users) == 0 {
 		id = g.store.Transient(key)
 	}
-	if !filterAllows(c.route.cfg.Users, strconv.FormatInt(id, 10)) {
+	if !filterAllows(c.policy.Users, strconv.FormatInt(id, 10)) {
 		return 0, nil
 	}
 	return id, nil
@@ -168,19 +168,19 @@ func (g *Gateway) officialProfileID(ctx context.Context, c call, native string) 
 
 func (g *Gateway) officialUserProfile(ctx context.Context, c call, p actionParams) (any, error) {
 	in := c.input
-	if !in.cfg.ObservedProfiles || p.NoCache {
+	if !in.policy().ObservedProfiles || p.NoCache {
 		return nil, actionError{1404, "QQ user lookup requires observed_profiles and permits only observed data"}
 	}
 	requested := numericID(p.UserID)
 	if requested <= 0 {
 		return nil, actionError{1400, "invalid user_id"}
 	}
-	groups := c.route.cfg.Groups
+	groups := c.policy.Groups
 	if len(groups) == 0 {
-		groups = in.cfg.GroupIDs
+		groups = in.policy().GroupIDs
 	}
 	if len(groups) == 0 && in.cfg.Role == config.Observe {
-		groups = in.cfg.BusinessGroups
+		groups = in.policy().BusinessGroups
 	}
 	var peers []string
 	scoped := len(groups) > 0 || in.cfg.Role == config.Observe
@@ -204,7 +204,7 @@ func (g *Gateway) officialUserProfile(ctx context.Context, c call, p actionParam
 		allowed bool
 	}{
 		{"group", peers, !scoped || len(peers) != 0},
-		{"private", nil, c.route.allowsConversation("private", "") && in.cfg.PrivateEnabled()},
+		{"private", nil, allowsConversation(c.policy, "private", "") && in.cfg.PrivateEnabled()},
 	} {
 		if !chat.allowed {
 			continue
@@ -225,7 +225,7 @@ func (g *Gateway) officialUserProfile(ctx context.Context, c call, p actionParam
 			continue
 		}
 		id := record.ExternalID()
-		if !filterAllows(c.route.cfg.Users, strconv.FormatInt(id, 10)) {
+		if !filterAllows(c.policy.Users, strconv.FormatInt(id, 10)) {
 			continue
 		}
 		observed, err := g.store.ObservedUser(ctx, in.namespace(), chat.kind, native, chat.peers, time.Now())
@@ -242,7 +242,7 @@ func (g *Gateway) officialUserProfile(ctx context.Context, c call, p actionParam
 
 func allowObservedProfile(in *input, noCache bool, err error) bool {
 	var api *qqofficial.APIError
-	return in.cfg.ObservedProfiles && !noCache && errors.As(err, &api) && api.Code == qqofficial.MissingAppPermission
+	return in.policy().ObservedProfiles && !noCache && errors.As(err, &api) && api.Code == qqofficial.MissingAppPermission
 }
 
 func officialMemberData(appID string, groupID, userID int64, member qqofficial.GroupMember) map[string]any {

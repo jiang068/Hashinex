@@ -51,7 +51,7 @@
     <div class="workspace-body">
       <header class="topbar">
         <span>控制台 <span class="breadcrumb-slash">/</span> <strong id="breadcrumb">仪表盘</strong></span>
-        <div class="actions"><span class="refresh-time" id="refresh-time"></span><button type="button" id="refresh">刷新</button><button type="button" id="restart" hidden>重启网关</button><button id="logout" type="button">退出</button></div>
+        <div class="actions"><span class="refresh-time" id="refresh-time"></span><button type="button" id="refresh">刷新</button><button type="button" id="restart" hidden>应用配置</button><button id="logout" type="button">退出</button></div>
       </header>
       <main id="main">
         <div class="save-bar" id="draft-bar" hidden>
@@ -110,7 +110,7 @@
           </article>
         </section>
         <section id="candidates" hidden>
-          <div class="page-heading"><div><h1>匹配管理</h1><p>查看消息配对、头像校验进度和身份冲突。</p></div><button type="button" id="edit-matching">匹配参数</button></div>
+          <div class="page-heading"><div><h1>匹配管理</h1><p>对照官方账号与候选 QQ 的当前头像，查看匹配进度和身份冲突。</p></div><button type="button" id="edit-matching">匹配参数</button></div>
           <article class="panel">
             <form class="toolbar" id="candidate-search">
               <input id="candidate-query" type="search" aria-label="检索匹配记录" placeholder="OpenID、QQ 号、群号或命名空间">
@@ -134,7 +134,7 @@
           </article>
         </section>
         <section id="settings" hidden>
-          <div class="page-heading"><div><h1>系统设置</h1><p>配置监听、数据库、匹配、队列和日志。</p></div></div>
+          <div class="page-heading"><div><h1>系统设置</h1><p>配置监听、数据库、匹配、队列和日志。</p></div><button type="button" id="reconnect" hidden>重连输入和输出</button></div>
           <div class="settings-grid" id="settings-list"></div>
           <details class="panel yaml-panel" id="yaml-panel">
             <summary>高级 YAML 编辑器</summary>

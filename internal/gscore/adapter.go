@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 	"hashinex/internal/config"
 	"hashinex/internal/onebot"
+	"hashinex/internal/transport"
 )
 
 const (
@@ -38,6 +39,9 @@ func Run(ctx context.Context, connections []Connection, log *slog.Logger) {
 }
 
 func reconnect(ctx context.Context, link Connection, log *slog.Logger) {
+	if link.timing == nil {
+		link.timing = transport.NewTiming(0, 0)
+	}
 	delay := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
@@ -48,13 +52,9 @@ func reconnect(ctx context.Context, link Connection, log *slog.Logger) {
 		if time.Since(start) >= 30*time.Second {
 			delay = time.Second
 		}
-		log.Warn("gscore adapter disconnected", "reason", reason, "retry_in", delay)
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		log.Warn("gscore adapter disconnected", "reason", reason, "retry_in", link.timing.ReconnectDelay(delay))
+		if !link.timing.WaitReconnect(ctx, time.Now(), delay) {
 			return
-		case <-timer.C:
 		}
 		delay = min(delay*2, 20*time.Second)
 	}
@@ -128,6 +128,18 @@ func session(parent context.Context, link Connection, log *slog.Logger) string {
 		})
 	}
 	startReader("", core)
+	if link.timing != nil {
+		readers.Go(func() {
+			if err := link.timing.Heartbeat(ctx, func() error {
+				ping, finish := context.WithTimeout(ctx, 5*time.Second)
+				defer finish()
+				return core.Ping(ping)
+			}); err != nil && ctx.Err() == nil {
+				log.Warn("gscore heartbeat failed")
+				cancel()
+			}
+		})
+	}
 	for selfID, bot := range bots {
 		startReader(selfID, bot)
 	}

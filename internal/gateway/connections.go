@@ -110,12 +110,12 @@ func (g *Gateway) upgradeOutput(w http.ResponseWriter, req *http.Request, r *rou
 func (g *Gateway) runInput(in *input, conn *websocket.Conn) {
 	log := g.log.With("input", in.cfg.ID)
 	g.mu.Lock()
-	if in.peer != nil || g.ctx.Err() != nil {
+	if in.peer != nil || g.ctx.Err() != nil || g.draining.Load() {
 		g.mu.Unlock()
 		_ = conn.Close(websocket.StatusPolicyViolation, "input already connected or stopping")
 		return
 	}
-	peer := transport.NewPeer(g.ctx, conn, g.limits, log)
+	peer := transport.NewPeer(g.ctx, conn, g.limits, in.timing, log)
 	in.peer = peer
 	g.mu.Unlock()
 	log.Info("upstream connected", "self_id", in.cfg.SelfID)
@@ -131,7 +131,7 @@ func (g *Gateway) runInput(in *input, conn *websocket.Conn) {
 func (g *Gateway) runOutput(r *route, conn *websocket.Conn) {
 	log := g.log.With("input", r.cfg.From, "output", r.cfg.To)
 	g.mu.Lock()
-	if r.peer != nil || g.ctx.Err() != nil {
+	if r.peer != nil || g.ctx.Err() != nil || g.draining.Load() {
 		g.mu.Unlock()
 		_ = conn.Close(websocket.StatusPolicyViolation, "output already connected or stopping")
 		return
@@ -141,7 +141,7 @@ func (g *Gateway) runOutput(r *route, conn *websocket.Conn) {
 		// The authenticated local adapter can receive frames up to this size from gscore.
 		limits.FrameBytes = limits.GScoreFrameBytes
 	}
-	peer := transport.NewPeer(g.ctx, conn, limits, log)
+	peer := transport.NewPeer(g.ctx, conn, limits, r.timing, log)
 	connected := time.Now()
 	lifecycle, _ := json.Marshal(map[string]any{
 		"time": connected.Unix(), "self_id": json.Number(r.input.cfg.SelfID),
@@ -160,7 +160,7 @@ func (g *Gateway) runOutput(r *route, conn *websocket.Conn) {
 }
 
 func (g *Gateway) dialInput(in *input) {
-	g.dial(in.cfg.Endpoint, nil, g.log.With("input", in.cfg.ID), func(conn *websocket.Conn) {
+	g.dial(in.cfg.Endpoint, in.timing, nil, g.log.With("input", in.cfg.ID), func(conn *websocket.Conn) {
 		g.runInput(in, conn)
 	})
 }
@@ -170,12 +170,12 @@ func (g *Gateway) dialOutput(r *route) {
 	headers.Set("X-Self-ID", r.input.cfg.SelfID)
 	headers.Set("X-Client-Role", "Universal")
 	log := g.log.With("input", r.cfg.From, "output", r.cfg.To)
-	g.dial(r.output.Endpoint, headers, log, func(conn *websocket.Conn) {
+	g.dial(r.output.Endpoint, r.timing, headers, log, func(conn *websocket.Conn) {
 		g.runOutput(r, conn)
 	})
 }
 
-func (g *Gateway) dial(endpoint config.Endpoint, headers http.Header, log *slog.Logger, run func(*websocket.Conn)) {
+func (g *Gateway) dial(endpoint config.Endpoint, timing *transport.Timing, headers http.Header, log *slog.Logger, run func(*websocket.Conn)) {
 	if headers == nil {
 		headers = make(http.Header)
 	}
@@ -204,18 +204,14 @@ func (g *Gateway) dial(endpoint config.Endpoint, headers http.Header, log *slog.
 			}
 			log.Warn("websocket dial failed", "http_status", status)
 		}
-		if g.ctx.Err() != nil {
+		if g.ctx.Err() != nil || g.draining.Load() {
 			return
 		}
 		attempt++
 		pause := delay + rand.N(delay/4)
-		log.Info("websocket reconnect scheduled", "attempt", attempt, "delay", pause)
-		timer := time.NewTimer(pause)
-		select {
-		case <-g.ctx.Done():
-			timer.Stop()
+		log.Info("websocket reconnect scheduled", "attempt", attempt, "delay", timing.ReconnectDelay(pause))
+		if !timing.WaitReconnect(g.ctx, time.Now(), pause) {
 			return
-		case <-timer.C:
 		}
 		delay = min(delay*2, 30*time.Second)
 	}

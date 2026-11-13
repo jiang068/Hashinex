@@ -69,7 +69,7 @@ func safeAvatarHost(u *url.URL) bool {
 
 func (a *AvatarVerifier) Verify(ctx context.Context, appID, openID string, qq int64, maxDistance int) (int, bool) {
 	official := qqofficial.AvatarURL(appID, openID)
-	observer := "https://q.qlogo.cn/g?b=qq&nk=" + strconv.FormatInt(qq, 10) + "&s=100"
+	observer := qqofficial.QQAvatarURL(qq)
 	left := a.get(ctx, official, 0)
 	if !left.usable {
 		return 0, false

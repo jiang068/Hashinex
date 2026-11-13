@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"hashinex/internal/transport"
 )
 
 type session struct {
@@ -19,7 +20,7 @@ type session struct {
 	seq int64
 }
 
-func (c *Client) RunGateway(ctx context.Context, intents uint64, frameLimit int64, ingest func(Dispatch) bool,
+func (c *Client) RunGateway(ctx context.Context, intents uint64, frameLimit int64, timing *transport.Timing, ingest func(Dispatch) bool,
 	online func(bool), log *slog.Logger) {
 	var current session
 	delay := time.Second
@@ -41,12 +42,10 @@ func (c *Client) RunGateway(ctx context.Context, intents uint64, frameLimit int6
 		if time.Since(start) > 30*time.Second {
 			delay = time.Second
 		}
-		timer := time.NewTimer(delay + rand.N(delay/4))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		pause := delay + rand.N(delay/4)
+		log.Info("QQ gateway reconnect scheduled", "delay", timing.ReconnectDelay(pause))
+		if !timing.WaitReconnect(ctx, time.Now(), pause) {
 			return
-		case <-timer.C:
 		}
 		delay = min(delay*2, 30*time.Second)
 	}

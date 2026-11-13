@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"regexp"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 var actionPattern = regexp.MustCompile(`^[a-zA-Z0-9_.]{1,128}$`)
 
 func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
+	policy := r.policy()
 	var frame onebot.Frame
 	if err := json.Unmarshal(raw, &frame); err != nil || !actionPattern.MatchString(frame.Action) || frame.PostType != "" {
 		g.respond(peer, onebot.Failure(frame.Echo, 1400, "expected a OneBot API action"))
@@ -22,29 +24,31 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 		g.respond(peer, onebot.Failure(frame.Echo, 1403, "request target conflicts with the connection's self_id"))
 		return
 	}
-	if !r.cfg.AllowActions {
+	if !policy.AllowActions {
 		g.respond(peer, onebot.Failure(frame.Echo, 1403, "API actions are disabled for this route"))
 		return
 	}
 	upstream := r.input
+	inputPolicy := r.input.policy()
+	var scopedGroup string
 	if r.input.official == nil {
 		var params actionParams
 		canRedirect := r.groupSender != nil && (frame.Action == "send_group_msg" || frame.Action == "send_msg" ||
 			(g.shares != nil && (forwardSend(frame.Action) || frame.Action == "upload_group_file")))
 		if err := json.Unmarshal(frame.Params, &params); err == nil {
 			group := onebot.ID(params.GroupID)
-			silent := group != "" && r.input.cfg.Silent(group, "")
-			if group != "" && r.cfg.Passthrough {
-				silent = g.oneBotGroupSilent(r.input, group, time.Now().Add(g.limits.APITimeout))
-			}
-			if group != "" && (silent || !r.allowsConversation("group", group)) {
-				g.respond(peer, onebot.Failure(frame.Echo, 1403, "group is outside the route scope or in silent mode"))
-				return
+			if group != "" {
+				if policy.Passthrough && r.input.virtualJobs != nil && (len(inputPolicy.SilentGroups) != 0 || len(inputPolicy.BusinessGroups) != 0) {
+					scopedGroup = group
+				} else if inputPolicy.Silent(group, "") || !allowsConversation(policy, "group", group) {
+					g.respond(peer, onebot.Failure(frame.Echo, 1403, "group is outside the route scope or in silent mode"))
+					return
+				}
 			}
 			if canRedirect {
 				switch params.sendKind(frame.Action) {
 				case "group":
-					if filterAllows(r.cfg.SendGroupViaGroups, group) {
+					if filterAllows(policy.SendGroupViaGroups, group) {
 						upstream = r.groupSender
 					}
 				case "private":
@@ -59,7 +63,7 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 		}
 	}
 	c := call{
-		input: upstream, route: r, downstream: peer, echo: frame.Echo, action: frame.Action,
+		input: upstream, route: r, policy: policy, downstream: peer, echo: frame.Echo, action: frame.Action,
 		start: time.Now(),
 	}
 	c.deadline = c.start.Add(g.limits.APITimeout)
@@ -85,6 +89,7 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 		return
 	}
 	key := g.nextKey()
+	c.request = key
 	r.pending++
 	r.input.pending++
 	if c.input != r.input {
@@ -106,9 +111,9 @@ func (g *Gateway) fromOutput(r *route, peer *transport.Peer, raw []byte) {
 		}
 		return
 	}
-	if c.input.virtualJobs != nil && !r.cfg.Passthrough {
+	if c.input.virtualJobs != nil && (!policy.Passthrough || scopedGroup != "") {
 		select {
-		case c.input.virtualJobs <- virtualJob{key: key, call: c, raw: raw, frame: frame}:
+		case c.input.virtualJobs <- virtualJob{key: key, call: c, raw: raw, frame: frame, scopedGroup: scopedGroup, inputPolicy: inputPolicy}:
 		default:
 			g.reject(key, 1503, "identity conversion queue full")
 		}
@@ -123,7 +128,14 @@ func (g *Gateway) sendUpstream(key string, c call, raw []byte) {
 		g.reject(key, 1400, "invalid API action")
 		return
 	}
-	if !c.upstream.SendAPI(upstream, c.deadline) {
+	g.mu.Lock()
+	_, pending := g.pending[key]
+	queued := pending && time.Now().Before(c.deadline) && c.upstream.SendAPI(upstream, c.deadline)
+	g.mu.Unlock()
+	if pending && !queued {
+		if !time.Now().Before(c.deadline) {
+			return // The timeout sweep owns the expired request.
+		}
 		g.reject(key, 1503, "upstream API queue unavailable")
 	}
 }
@@ -140,7 +152,7 @@ func (g *Gateway) finish(in *input, peer *transport.Peer, rawEcho json.RawMessag
 		g.log.Debug("unmatched upstream response")
 		return
 	}
-	if in.virtualReplies != nil && !c.route.cfg.Passthrough {
+	if in.virtualReplies != nil && !c.policy.Passthrough {
 		g.mu.Unlock()
 		ctx, cancel := context.WithDeadline(g.ctx, c.deadline)
 		converted, err := g.rewriteVirtualResponse(ctx, in, c.action, raw)
@@ -167,8 +179,12 @@ func (g *Gateway) finish(in *input, peer *transport.Peer, rawEcho json.RawMessag
 		reply = onebot.Failure(c.echo, 1502, "invalid upstream response")
 	}
 	g.respond(c.downstream, reply)
-	g.log.Debug("API call settled", "input", c.input.cfg.ID, "output", c.route.output.ID,
-		"request", key, "action", c.action, "elapsed", time.Since(c.start))
+	if g.log.Enabled(g.ctx, slog.LevelDebug) {
+		var result onebot.Frame
+		_ = json.Unmarshal(reply, &result)
+		g.log.Debug("API call settled", "input", c.input.cfg.ID, "output", c.route.output.ID,
+			"request", key, "action", c.action, "retcode", result.RetCode, "elapsed", time.Since(c.start))
+	}
 }
 
 func (g *Gateway) respond(peer *transport.Peer, reply []byte) {
@@ -185,6 +201,8 @@ func (g *Gateway) reject(key string, code int, reason string) {
 	}
 	g.mu.Unlock()
 	if ok {
+		g.log.Debug("API call rejected", "input", c.route.input.cfg.ID, "sender", c.input.cfg.ID, "output", c.route.output.ID,
+			"request", key, "action", c.action, "retcode", code, "elapsed", time.Since(c.start), "reason", reason)
 		g.respond(c.downstream, onebot.Failure(c.echo, code, reason))
 	}
 }

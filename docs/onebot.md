@@ -15,7 +15,9 @@
 
 将连接类型设为反向 Universal WebSocket 客户端，填写输入地址和令牌。在 Hashinex 填写 Bot 自己的 QQ 号作为 `self_id`。确认事件含真实 QQ 号与群号时设置 `identity_source: real-qq`。
 
-WebUI 的输入编辑窗口提供可复制的完整「反向 WebSocket 连接地址」。路径留空时用 `/onebot/in/输入名称`，自定义路径时预览会同步更新。设置了 `public_ws_url` 时，预览使用该对外地址。保存后点击「重启网关」应用变更。
+WebUI 的输入编辑窗口提供可复制的完整「反向 WebSocket 连接地址」。路径留空时用 `/onebot/in/输入名称`，自定义路径时预览会同步更新。设置了 `public_ws_url` 时，预览使用该对外地址。保存后点击「应用配置」。
+
+在「输入管理」或「输出管理」可以为 OneBot 和 gscore 的 WebSocket 设置心跳间隔（`heartbeat_interval`）。留空继承 `limits.ping_interval`。这里的心跳是 WebSocket Ping。Hashinex 主动拨号的 OneBot、gscore 和 QQ 官方 Gateway 可设置重连间隔（`reconnect_interval`）。留空使用指数退避。两个实例级间隔都接受 `1s` 到 `10m`。监听模式在发起连接的一侧配置重连间隔，QQ 官方 Gateway 采用服务端下发的心跳周期。
 
 - 正常转发设置 `role: active`，添加至少一条路由。
 - 设置 `role: observe` 可默认静默。通过 `business_groups` 指定例外群，或在业务 Bot 上用 `silent_groups` 指定静默群。静默群事件不发往业务路由。
@@ -31,7 +33,7 @@ WebUI 的输入编辑窗口提供可复制的完整「反向 WebSocket 连接地
 
 1. 将野生 Bot 接为提供真实 QQ 号的 OneBot 输入，并放行业务群。
 2. 让官 Bot 加入目标群，在其输入设置开启「允许主动发送」，并在「身份映射」中确认该官 Bot 的群 OpenID 已绑定到真实群号。官 Bot 配置了群白名单时，目标群必须在白名单内。目标群可继续在官 Bot 输入上保持静默。
-3. 在「路由管理」选择野生 Bot 为来源、gscore 或 AstrBot 为输出，开启「允许下游 API 回程」，在「群消息发送 Bot」选择官 Bot。填写「官 Bot 发送群号」后，只有名单内的群改由官 Bot 发送，其他群仍由野生 Bot 回复。此字段留空时，官 Bot 负责该路由允许的所有群。保存后重启网关。
+3. 在「路由管理」选择野生 Bot 为来源、gscore 或 AstrBot 为输出，开启「允许下游 API 回程」，在「群消息发送 Bot」选择官 Bot。填写「官 Bot 发送群号」后，只有名单内的群改由官 Bot 发送，其他群仍由野生 Bot 回复。此字段留空时，官 Bot 负责该路由允许的所有群。保存后点击「应用配置」。
 
 ```yaml
 routes:

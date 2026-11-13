@@ -18,6 +18,7 @@ let edit;
 let noticeTimer;
 let refreshJob;
 let candidateRequest = 0;
+let renderedCandidates = "";
 let identityRequest = 0;
 let routeInput = "";
 let routeOutput = "";
@@ -183,10 +184,12 @@ function renderOverview(health) {
   const outputs = new Map();
   for (const item of live.outputs) {
     const key = item.protocol === "gscore" ? item.id : item.id + "\u0000" + item.input;
-    const entry = outputs.get(key) || { id: item.id, inputs: [], online: false, writable: false };
+    const entry = outputs.get(key) || { id: item.id, inputs: [], online: false, writable: false, queued: 0, undelivered: 0 };
     entry.inputs.push(item.input);
     entry.online ||= item.online;
     entry.writable ||= item.writable;
+    entry.queued += item.queued || 0;
+    entry.undelivered += item.undelivered || 0;
     outputs.set(key, entry);
   }
   get("metrics").replaceChildren(
@@ -210,7 +213,8 @@ function renderOverview(health) {
     element("div", "", element("dt", "", name), element("dd", "", String(value)))));
   table("connections-table", ["实例", "方向", "协议 / 会话", "连接状态", "队列 / API"],
     [...live.inputs.map(item => [code(item.id), "输入", protocols[item.protocol], linkState(item.online), count(item.queued) + " 个事件"]),
-     ...[...outputs.values()].map(item => [code(item.id), "输出", "来源 " + item.inputs.join("、"), linkState(item.online), item.writable ? "可回程" : "仅转发"])],
+     ...[...outputs.values()].map(item => [code(item.id), "输出", "来源 " + item.inputs.join("、"), linkState(item.online),
+       (item.writable ? "可回程" : "仅转发") + " · 排队 " + count(item.queued) + " · 未投递 " + count(item.undelivered)])],
     "暂无连接。可以从输入管理添加 Bot。");
   drawTraffic();
 }
@@ -351,6 +355,25 @@ async function renderIdentities() {
   pager("identity-pager", identityPage, result, renderIdentities);
 }
 
+function candidateAvatar(address, label) {
+  const placeholder = () => {
+    const node = element("span", "candidate-avatar candidate-avatar-placeholder", "—");
+    node.setAttribute("role", "img");
+    node.setAttribute("aria-label", label + "不可用");
+    node.title = label + "不可用";
+    return node;
+  };
+  if (!address) return placeholder();
+  const image = element("img", "candidate-avatar");
+  image.alt = label;
+  image.loading = "lazy";
+  image.decoding = "async";
+  image.referrerPolicy = "no-referrer";
+  image.addEventListener("error", () => image.replaceWith(placeholder()), { once: true });
+  image.src = address;
+  return image;
+}
+
 function renderCandidates(rows) {
   const summaries = [
     matchingModes[live.matching] || "—",
@@ -367,8 +390,11 @@ function renderCandidates(rows) {
       const label = row.count + " / " + threshold + (row.kind === "group" ? " · " + row.senders + " 人" : "");
       progress.setAttribute("aria-label", label);
       const status = row.frozen ? badge("冲突冻结", "red") : row.bound ? badge("已绑定", "green") : badge("待确认", "amber");
-      return [code(row.namespace), element("div", "", kind(row.kind), element("small", "log-details mono", row.native)),
-        code(row.real_id), sourceGroups(row.kind === "group" ? [{ real_id: row.real_id, native: row.native }] : row.sources || []),
+      const original = element("div", "", row.kind === "user" ? "官方用户" : kind(row.kind), element("small", "log-details mono", row.native));
+      const source = row.kind === "user" ? element("div", "candidate-identity", candidateAvatar(row.official_avatar_url, "官方用户头像"), original) : original;
+      const candidate = row.kind === "user" ? element("div", "candidate-identity", candidateAvatar(row.qq_avatar_url, "候选 QQ 头像"), code(row.real_id)) : code(row.real_id);
+      return [code(row.namespace), source, candidate,
+        sourceGroups(row.kind === "group" ? [{ real_id: row.real_id, native: row.native }] : row.sources || []),
         element("div", "progress", label, progress), row.distance ?? "—", status,
         button(row.frozen ? "处理冲突" : row.bound ? "调整绑定" : "确认绑定", () => openBinding(row))];
     }), "没有符合条件的匹配证据。");
@@ -379,7 +405,11 @@ async function loadCandidates() {
   const query = new URLSearchParams({ q: get("candidate-query").value.trim(), status: get("candidate-filter").value, ...candidatePage });
   const result = await (await request("api/candidates?" + query)).json();
   if (requestID !== candidateRequest) return;
-  renderCandidates(result.rows);
+  const snapshot = JSON.stringify([result.rows, live.matching, live.user_threshold, live.group_threshold, live.group_sender_threshold]);
+  if (snapshot !== renderedCandidates) {
+    renderCandidates(result.rows);
+    renderedCandidates = snapshot;
+  }
   pager("candidate-pager", candidatePage, result, loadCandidates);
 }
 
@@ -551,7 +581,8 @@ function renderRestart() {
   const pending = restarting || live.restarting;
   restart.hidden = !live.restart_available;
   restart.disabled = busy || pending || Boolean(restartAddress);
-  restart.textContent = pending ? "正在重启…" : "重启网关";
+  restart.textContent = pending ? "正在应用…" : "应用配置";
+  const reconnect = get("reconnect");
   const banner = get("restart-note");
   banner.toggleAttribute("data-error", Boolean(live.restart_error));
   if (live.restart_error) {
@@ -563,10 +594,12 @@ function renderRestart() {
     link.href = restartAddress.href;
     banner.replaceChildren("网关将切换监听地址。请通过新地址打开控制台 ", link);
   } else if (pending) {
-    banner.textContent = "正在重启网关并应用已保存的配置。";
+    banner.textContent = "正在应用已保存的配置。";
   } else {
-    banner.textContent = live.restart_needed ? "配置已保存，点击「重启网关」应用。" : "";
+    banner.textContent = live.restart_needed ? "配置已保存，点击「应用配置」生效。" : "";
   }
+  reconnect.hidden = restart.hidden;
+  reconnect.disabled = restart.disabled;
   banner.hidden = !banner.textContent;
 }
 
@@ -838,7 +871,7 @@ async function saveSettings() {
     live.restart_error = "";
     settings = null;
     await ensureSettings();
-    notice("配置已保存，点击「重启网关」应用。");
+    notice("配置已保存，点击「应用配置」生效。");
   } catch (error) {
     setSaveError("settings-save-error", error.message);
   } finally {
@@ -847,14 +880,21 @@ async function saveSettings() {
   }
 }
 
-async function restartGateway() {
+async function restartGateway(force = false) {
   if (busy || live.restarting) return;
-  if (changed.size || yamlDirty) throw new Error("请先保存或撤销未保存的更改，再重启网关。");
+  if (changed.size || yamlDirty) throw new Error("请先保存或撤销未保存的更改，再应用配置。");
+  if (force && !confirm("将短暂断开输入和输出，使用已保存的配置重新连接。继续吗？")) return;
   restarting = busy = true;
   renderRestart();
   try {
-    const response = await request("api/restart", { method: "POST" });
+    const response = await request(force ? "api/restart?force=1" : "api/restart", { method: "POST" });
     const restart = await response.json();
+    if (restart.applied_live) {
+      await refresh();
+      await loadPage();
+      notice("配置已在线生效。");
+      return;
+    }
     if (restart.listen_changed) {
       const address = listenerURL(restart.listen);
       if (address && address.origin !== location.origin) {
@@ -938,7 +978,7 @@ async function saveYAML() {
     settings = null;
     await ensureSettings();
     renderSettings();
-    notice("YAML 已保存，点击「重启网关」应用。");
+    notice("YAML 已保存，点击「应用配置」生效。");
   } catch (error) {
     setSaveError("yaml-save-error", error.message);
   } finally {
@@ -1002,7 +1042,10 @@ get("logout").addEventListener("click", () => {
 });
 get("refresh").addEventListener("click", () => attempt(async () => {
   await refresh();
-  if (page === "candidates") await loadCandidates();
+  if (page === "candidates") {
+    renderedCandidates = "";
+    await loadCandidates();
+  }
   if (page === "identities") await renderIdentities();
   if (!changed.size && !yamlDirty && ["inputs", "outputs", "routes", "settings"].includes(page) && !busy) {
     settings = null;
@@ -1046,6 +1089,7 @@ get("log-filter").addEventListener("input", renderLogs);
 get("log-level").addEventListener("change", renderLogs);
 get("save").addEventListener("click", () => attempt(saveSettings));
 get("restart").addEventListener("click", () => attempt(restartGateway));
+get("reconnect").addEventListener("click", () => attempt(() => restartGateway(true)));
 get("discard").addEventListener("click", () => attempt(discardSettings));
 get("yaml-panel").addEventListener("toggle", () => {
   const panel = get("yaml-panel");

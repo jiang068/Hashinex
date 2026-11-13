@@ -34,13 +34,15 @@ const (
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
 type Endpoint struct {
-	ID         string `yaml:"id"`
-	Mode       string `yaml:"ws_mode,omitempty"`
-	URL        string `yaml:"url,omitempty"`
-	ListenPath string `yaml:"listen_path,omitempty"`
-	TokenEnv   string `yaml:"token_env,omitempty"`
-	TokenRef   string `yaml:"token_ref,omitempty"`
-	Token      string `yaml:"-"`
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval,omitempty"`
+	ReconnectInterval time.Duration `yaml:"reconnect_interval,omitempty"`
+	ID                string        `yaml:"id"`
+	Mode              string        `yaml:"ws_mode,omitempty"`
+	URL               string        `yaml:"url,omitempty"`
+	ListenPath        string        `yaml:"listen_path,omitempty"`
+	TokenEnv          string        `yaml:"token_env,omitempty"`
+	TokenRef          string        `yaml:"token_ref,omitempty"`
+	Token             string        `yaml:"-"`
 }
 
 type Input struct {
@@ -371,6 +373,9 @@ func (cfg *Config) validate(secrets map[string]string) error {
 		if _, exists := inputs[input.ID]; exists {
 			return fmt.Errorf("输入 %q 的名称（id）重复。请给两个输入使用不同的名称，并更新引用该名称的路由和观察实例名单。", input.ID)
 		}
+		if err := input.Endpoint.validateTiming(input.Protocol == OneBot11, input.Mode == ForwardDial || input.Protocol == QQOfficial && input.Events == "gateway"); err != nil {
+			return fmt.Errorf("输入 %q：%w", input.ID, err)
+		}
 		if input.Role == "" {
 			input.Role = Active
 		}
@@ -465,6 +470,9 @@ func (cfg *Config) validate(secrets map[string]string) error {
 		}
 		if _, exists := outputs[output.ID]; exists {
 			return fmt.Errorf("输出 %q 的名称（id）重复。请给两个输出使用不同的名称，并更新相关路由。", output.ID)
+		}
+		if err := output.Endpoint.validateTiming(true, output.Mode == ReverseDial || output.Protocol == GScore); err != nil {
+			return fmt.Errorf("输出 %q：%w", output.ID, err)
 		}
 		if output.OfficialFileRoot != "" && !filepath.IsAbs(output.OfficialFileRoot) {
 			return fmt.Errorf("输出 %q 的「官 Bot 本地文件目录」（official_file_root）须填写网关进程能读取的绝对路径。", output.ID)

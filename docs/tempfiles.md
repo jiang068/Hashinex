@@ -8,14 +8,14 @@
 2. 「监听地址」使用独立端口，例如 `127.0.0.1:6701`。在内网穿透或反向代理中将公网入口指向它。
 3. 「公网地址」填写访客实际使用的完整地址，例如 `https://share.example.com/share`。路径留空时使用 `/share`。代理转发时保留该路径。
 4. 「文件目录」默认是运行目录下的 `data/tempfiles`，也可指定专用目录。相对路径以配置文件所在目录为起点。默认总容量为 512 MiB，有效期为 10 分钟。
-5. 保存配置并重启网关。看到网关日志 `temporary share listening` 后，分享端口已启动。将分享域名添加到 QQ 开放平台的「开发设置 → 消息 URL 配置」。 [QQ 机器人发送消息文档](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md)
+5. 保存后点击「应用配置」。看到网关日志 `temporary share listening` 后，分享端口已启动。将分享域名添加到 QQ 开放平台的「开发设置 → 消息 URL 配置」。 [QQ 机器人发送消息文档](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md)
 
 本地文件仍通过对应输出的「官 Bot 本地文件目录」授权读取。AstrBot 和 Hashinex 分开部署时，把同一目录挂载到 Hashinex，使下游发来的文件绝对路径也能由网关读取。分享服务复制文件，在有效期结束时清理临时副本。
 
 ## 支持的消息
 
 - AstrBot 的 OneBot `file` 段及 `upload_group_file`、`upload_private_file` 动作。
-- OneBot 或 gscore 同一条消息里的两张及以上图片，连同消息里的文字一起展示。使用 gscore 的单图模式时，gscore 会拆成独立消息。在「系统设置 → 队列与超时」可调整内置 gscore 单帧上限（`limits.gscore_frame_bytes`），默认 16 MiB。AstrBot 等外部连接使用 `limits.frame_bytes`。保存后重启网关。
+- OneBot 或 gscore 同一条消息里的两张及以上图片，连同消息里的文字一起展示。使用 gscore 的单图模式时，gscore 会拆成独立消息。在「系统设置 → 队列与超时」可调整内置 gscore 单帧上限（`limits.gscore_frame_bytes`），默认 16 MiB。AstrBot 等外部连接使用 `limits.frame_bytes`。保存后点击「应用配置」。
 - 合并转发的 OneBot `node` 内容和 gscore 的 `node` 内容。仅带原消息 ID 的节点需要能在当前会话读到对应原消息。
 
 本地和 Base64 图片写入临时目录。网络附件由访客浏览器使用原地址访问，受原地址的可用性影响。

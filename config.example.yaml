@@ -34,6 +34,7 @@ routes: []
 #     role: active
 #     identity_source: real-qq
 #     self_id: "10001"
+#     heartbeat_interval: 20s
 # outputs:
 #   - id: astrbot
 #     protocol: onebot11
@@ -41,6 +42,8 @@ routes: []
 #   - id: gscore
 #     protocol: gscore
 #     url: "ws://127.0.0.1:8765/ws/hashinex"
+#     heartbeat_interval: 20s
+#     reconnect_interval: 5s
 # routes:
 #   - from: napcat
 #     outputs: [astrbot, gscore]

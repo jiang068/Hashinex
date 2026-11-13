@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"gopkg.in/yaml.v3"
+	"hashinex/internal/transport"
 )
 
 type Connection struct {
@@ -21,6 +22,7 @@ type Connection struct {
 	onebotSecret string
 	targets      []Target
 	frameBytes   int64
+	timing       *transport.Timing
 }
 
 type Target struct {
@@ -108,7 +110,7 @@ func websocketURL(address string) (*url.URL, error) {
 	return u, nil
 }
 
-func ManagedConnection(name, coreURL, coreToken string, targets []Target, frameBytes int64) Connection {
+func ManagedConnection(name, coreURL, coreToken string, targets []Target, frameBytes int64, timing *transport.Timing) Connection {
 	if coreToken != "" {
 		u, _ := websocketURL(coreURL)
 		query := u.Query()
@@ -116,5 +118,5 @@ func ManagedConnection(name, coreURL, coreToken string, targets []Target, frameB
 		u.RawQuery = query.Encode()
 		coreURL = u.String()
 	}
-	return Connection{Name: name, CoreURL: coreURL, targets: targets, frameBytes: frameBytes}
+	return Connection{Name: name, CoreURL: coreURL, targets: targets, frameBytes: frameBytes, timing: timing}
 }
